@@ -13,16 +13,41 @@ wheels/
 .env
 .env.*
 !.env.example
+*.pem
+*.key
+
+# Environment / packaging
+.uv/
+.python-version
 
 # Tooling caches
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
 
 # Editor
 .vscode/
 .idea/
+*.swp
+*~
+.DS_Store
 
 # Runtime output
 output/
+outputs/
 logs/
+*.log
+tmp/
+temp/
+
+# Harness runtime data
+checkpoints/
+sessions/
+runs/
+*.db
+*.sqlite
+*.sqlite3
