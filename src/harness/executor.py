@@ -22,6 +22,7 @@ from typing import Any, Protocol, runtime_checkable
 from harness.args_validate import parse_call_arguments
 from harness.execution import BatchPlan, ExecGroup, ExecResult, error_content
 from harness.message import ToolCall
+from harness.truncate import DEFAULT_MAX_CHARS, truncate_result
 
 __all__ = [
     "DEFAULT_MAX_WORKERS",
@@ -84,25 +85,33 @@ GroupDoneHook = Callable[[GroupReport], Committed | None]
 """组完成回调；返回 ``Committed`` 表示本组已提交且剩余组应停止执行。"""
 
 
-def _content_of(value: Any) -> str:
-    """把工具返回值转成 ``ToolMsg.content`` 所需的字符串（D4）。"""
-    if isinstance(value, str):
-        return value
-    try:
-        return json.dumps(value, ensure_ascii=False, default=str)
-    except (TypeError, ValueError):
-        return str(value)
+def _content_of(value: Any, max_chars: int = DEFAULT_MAX_CHARS) -> str:
+    """把工具返回值转成 ``ToolMsg.content`` 所需的字符串（D4）。
+
+    ponytail: C1 截断在此接入——它是工具结果进入 ``ToolMsg`` 的唯一出口，
+    放这里才能同时覆盖成功与失败两条路径。
+    """
+    if not isinstance(value, str):
+        try:
+            value = json.dumps(value, ensure_ascii=False, default=str)
+        except (TypeError, ValueError):
+            value = str(value)
+    return truncate_result(value, max_chars=max_chars)
 
 
-def _failed_content(exc: BaseException) -> str:
+def _failed_content(exc: BaseException, max_chars: int = DEFAULT_MAX_CHARS) -> str:
     """``3c`` 的 ``content``：错误类型 + 消息 + traceback（仍是合法字符串）。"""
     detail = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
-    return error_content("3c", f"{type(exc).__name__}: {exc}\n{detail}")
+    return truncate_result(
+        error_content("3c", f"{type(exc).__name__}: {exc}\n{detail}"),
+        max_chars=max_chars,
+    )
 
 
 def _run_one(
     call: ToolCall,
     resolver: Callable[[ToolCall], ExecToolDef],
+    max_chars: int = DEFAULT_MAX_CHARS,
 ) -> ExecResult:
     """执行单个调用；任何异常都收敛为 ``3c``（§4.6 Executor 职责）。"""
     started = time.perf_counter()
@@ -113,7 +122,7 @@ def _run_one(
         elapsed = int((time.perf_counter() - started) * 1000)
         return ExecResult(
             ok=True,
-            content=_content_of(value),
+            content=_content_of(value, max_chars),
             error_type=None,
             retryable=tool.idempotent,
             duration_ms=elapsed,
@@ -122,7 +131,7 @@ def _run_one(
         elapsed = int((time.perf_counter() - started) * 1000)
         return ExecResult(
             ok=False,
-            content=_failed_content(exc),
+            content=_failed_content(exc, max_chars),
             error_type="3c",
             retryable=bool(getattr(tool, "idempotent", False)),
             duration_ms=elapsed,
@@ -133,6 +142,7 @@ def _run_group(
     group: ExecGroup,
     resolver: Callable[[ToolCall], ExecToolDef],
     max_workers: int,
+    max_chars: int = DEFAULT_MAX_CHARS,
 ) -> dict[str, ExecResult]:
     """执行一个组，返回 ``{tool_call_id: ExecResult}``。
 
@@ -143,11 +153,12 @@ def _run_group(
         workers = max(1, min(max_workers, len(group.calls)))
         with ThreadPoolExecutor(max_workers=workers) as pool:
             futures = [
-                (call, pool.submit(_run_one, call, resolver)) for call in group.calls
+                (call, pool.submit(_run_one, call, resolver, max_chars))
+                for call in group.calls
             ]
             return {call.id: future.result() for call, future in futures}
 
-    return {call.id: _run_one(call, resolver) for call in group.calls}
+    return {call.id: _run_one(call, resolver, max_chars) for call in group.calls}
 
 
 def execute_batch(
@@ -156,6 +167,7 @@ def execute_batch(
     on_group_done: GroupDoneHook | None = None,
     *,
     max_workers: int = DEFAULT_MAX_WORKERS,
+    max_chars: int = DEFAULT_MAX_CHARS,
 ) -> dict[str, ExecResult]:
     """按 ``groups`` 顺序执行整批，并把结果写回 ``plan.results``。
 
@@ -169,6 +181,7 @@ def execute_batch(
             后续组；本模块**不自行补占位**，由编排层在回调中调用
             :func:`harness.execution.fill_placeholders`。
         max_workers: 并行组的线程数上限，默认 4。
+        max_chars: 单条工具结果的字符上限（C1），默认 4000。
 
     Returns:
         与 ``plan.calls`` 一一对应的 ``{tool_call_id: ExecResult}``（D2）。
@@ -182,7 +195,7 @@ def execute_batch(
     total = len(plan.groups)
 
     for position, group in enumerate(plan.groups):
-        group_results = _run_group(group, resolver, max_workers)
+        group_results = _run_group(group, resolver, max_workers, max_chars)
         # D3：按组内 calls 顺序写入，不按完成顺序
         for call in group.calls:
             plan.record(call.id, group_results[call.id])

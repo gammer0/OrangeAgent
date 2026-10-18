@@ -147,7 +147,7 @@ class TestAsDict:
     def test_returns_plain_values(self) -> None:
         data = as_dict()
         assert data["context"]["capacity"] == 32768
-        assert data["loop"]["max_steps"] == 20
+        assert data["loop"]["max_steps"] == 40
 
     def test_no_secret_field(self) -> None:
         """默认值里绝不能出现密钥类字段。"""

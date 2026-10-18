@@ -541,6 +541,14 @@ class SessionManager:
         self._sessions: dict[str, SessionRunner] = {}
         self._lock = threading.Lock()
 
+    @property
+    def compress_available(self) -> bool:
+        """C3 压缩是否可用（各会话均未注入摘要器，恒为 False）。
+
+        在 ``/api/health`` 暴露，避免"压缩从未发生"这种静默退化被忽略。
+        """
+        return False
+
     def load_capabilities(self, workdir: str) -> None:
         """按 ``.agent/capabilities.json`` 覆盖工具树；失败时保留演示工具。
 

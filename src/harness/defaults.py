@@ -50,7 +50,7 @@ class ContextDefaults:
 class LoopDefaults:
     """循环与终止默认值。"""
 
-    max_steps: int = 20
+    max_steps: int = 40
     max_injects: int = 10
     deadlock_threshold: int = 3
 

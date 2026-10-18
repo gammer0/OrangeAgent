@@ -44,7 +44,7 @@ class TestConfigCommands:
         code, out = _run(["config", "get", "max_steps"], capsys)
         assert code == 0
         assert "loop.max_steps" in out
-        assert "20" in out
+        assert "40" in out
 
     def test_unknown_key_returns_2(self, capsys: pytest.CaptureFixture[str]) -> None:
         code, out = _run(["config", "get", "not_a_real_key"], capsys)
