@@ -1,15 +1,19 @@
-"""记忆层（ADT-5，C 组）。
+"""Memory layer (ADT-5, group C).
 
-对应文档：docs/02-数据结构设计/05-记忆.md
+See docs/02-data-structures/05-memory.md.
 
-设计要点：
+Design notes:
 
-* 记忆以**文件**为存储单位，不是内存对象。
-* 工作记忆 ``<workdir>/.agent/WORK.md`` 为自由文本，系统不解析其结构（C1）。
-* 长期记忆 ``<global>/.agent/MEMORY.md`` 全系统唯一，只追加合并（C7）。
-* 所有写入走「临时文件 + ``os.replace``」保证原子性（C4）。
-* 本模块只提供**可在后台线程调用的纯函数/类**，不含线程调度：
-  后台运行由调用方负责（C5 的「失败不影响主循环」由调用方隔离）。
+* Memory is stored as **files**, not in-memory objects.
+* Working memory ``<workdir>/.agent/WORK.md`` is free text; the system never
+  parses its structure (C1).
+* Long-term memory ``<global>/.agent/MEMORY.md`` is system-wide unique and
+  append-merge only (C7).
+* Every write goes through "temp file + ``os.replace``" for atomicity (C4).
+* This module only provides **pure functions/classes safe to call from a
+  background thread**; it performs no scheduling. Running in the background is
+  the caller's responsibility (C5's "failure does not affect the main loop" is
+  isolated by the caller).
 """
 
 from __future__ import annotations
@@ -46,50 +50,53 @@ __all__ = [
     "extraction_transition",
 ]
 
-# --------------------------------------------------------------------------- 路径
+# ------------------------------------------------------------------------ paths
 
-#: 目录名：``<workdir>/.agent/`` 与 ``<global>/.agent/``
+#: Directory name: ``<workdir>/.agent/`` and ``<global>/.agent/``
 AGENT_DIR_NAME = ".agent"
-#: 工作记忆文件名（每个工作目录一份，多会话共享，C4）
+#: Working-memory file name (one per working directory, shared across sessions, C4)
 WORK_MEMORY_FILENAME = "WORK.md"
-#: 长期记忆文件名（全系统唯一，C7）
+#: Long-term memory file name (system-wide unique, C7)
 LONG_TERM_MEMORY_FILENAME = "MEMORY.md"
-#: 提取原则文件名（全系统唯一，C7）
+#: Extraction-principle file name (system-wide unique, C7)
 EXTRACT_PRINCIPLE_FILENAME = "extract.md"
 
 
 def work_memory_path(workdir: str | os.PathLike[str]) -> Path:
-    """返回工作记忆路径 ``<workdir>/.agent/WORK.md``（C1/C4）。"""
+    """Return the working-memory path ``<workdir>/.agent/WORK.md`` (C1/C4)."""
     return Path(workdir) / AGENT_DIR_NAME / WORK_MEMORY_FILENAME
 
 
 def long_term_memory_path(global_dir: str | os.PathLike[str]) -> Path:
-    """返回长期记忆路径 ``<global>/.agent/MEMORY.md``（C7）。
+    """Return the long-term memory path ``<global>/.agent/MEMORY.md`` (C7).
 
-    ``global_dir`` 即全局目录；该路径不随工作目录变化（C7）。
+    ``global_dir`` is the global directory; this path does not vary with the
+    working directory (C7).
     """
     return Path(global_dir) / AGENT_DIR_NAME / LONG_TERM_MEMORY_FILENAME
 
 
 def extract_principle_path(global_dir: str | os.PathLike[str]) -> Path:
-    """返回提取原则路径 ``<global>/.agent/extract.md``（C7）。"""
+    """Return the extraction-principle path ``<global>/.agent/extract.md`` (C7)."""
     return Path(global_dir) / AGENT_DIR_NAME / EXTRACT_PRINCIPLE_FILENAME
 
 
-# ----------------------------------------------------------------- 原子写（C4）
+# ------------------------------------------------------------- atomic write (C4)
 
 
-#: 替换失败时的重试次数与间隔（Windows 上并发读者持有句柄会报 WinError 5）
+#: Retry count and interval when replacement fails (on Windows a concurrent
+#: reader holding a handle raises WinError 5)
 _REPLACE_RETRIES = 40
 _REPLACE_BACKOFF_S = 0.002
 
 
 def _replace_with_retry(src: Path, dst: Path) -> None:
-    """``os.replace``，遇 Windows 共享冲突时短暂重试。
+    """``os.replace`` with a brief retry on Windows sharing violations.
 
-    POSIX 上 ``replace`` 不会被读者阻塞，通常一次成功；Windows 上若另一
-    线程正持有目标文件句柄，会抛 ``PermissionError``（WinError 5/32）。
-    这里做有限重试，仍然失败则原样抛出（不掩盖真实错误）。
+    On POSIX ``replace`` is never blocked by readers and usually succeeds on the
+    first try; on Windows another thread holding a handle to the target raises
+    ``PermissionError`` (WinError 5/32). We retry a bounded number of times and
+    re-raise if it still fails (never masking the real error).
     """
     for attempt in range(_REPLACE_RETRIES):
         try:
@@ -102,11 +109,12 @@ def _replace_with_retry(src: Path, dst: Path) -> None:
 
 
 def _atomic_write_text(path: Path, text: str) -> None:
-    """原子写入文本：同目录临时文件 + flush + fsync + ``os.replace``。
+    """Write text atomically: temp file in the same directory + flush + fsync + ``os.replace``.
 
-    ``os.replace`` 在同一文件系统上是原子的，因此并发读者只会看到
-    「旧完整内容」或「新完整内容」，不会看到半截文件（C4）。
-    临时文件失败时会被清理，不污染目录。
+    ``os.replace`` is atomic within one filesystem, so concurrent readers see
+    either "the old complete content" or "the new complete content", never a
+    half-written file (C4). The temp file is cleaned up on failure and never
+    pollutes the directory.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
@@ -123,10 +131,10 @@ def _atomic_write_text(path: Path, text: str) -> None:
 
 
 def _read_text_with_retry(path: Path) -> str | None:
-    """读取文本；文件不存在返回 ``None``。
+    """Read text; return ``None`` when the file does not exist.
 
-    Windows 上读取与别人 ``os.replace`` 撞车时可能抛 ``PermissionError``
-    （WinError 13/5），短暂重试即可。
+    On Windows a read racing with another ``os.replace`` can raise
+    ``PermissionError`` (WinError 13/5); a brief retry is enough.
     """
     for attempt in range(_REPLACE_RETRIES):
         try:
@@ -140,34 +148,37 @@ def _read_text_with_retry(path: Path) -> str | None:
     return None
 
 
-# ----------------------------------------------------------- 工作记忆（C1/C4）
+# ------------------------------------------------------- working memory (C1/C4)
 
 
 def read_working_memory(workdir: str | os.PathLike[str]) -> str:
-    """读取 ``<workdir>/.agent/WORK.md`` 的原文。
+    """Read the raw text of ``<workdir>/.agent/WORK.md``.
 
-    文件不存在时返回空串：工作记忆没有结构，缺失即「空」（C1）。
-    不做任何解析、不裁剪、不改写换行。
+    A missing file returns the empty string: working memory has no structure, so
+    absent means empty (C1). Nothing is parsed, trimmed or re-wrapped.
     """
     text = _read_text_with_retry(work_memory_path(workdir))
     return "" if text is None else text
 
 
 def write_working_memory_atomic(workdir: str | os.PathLike[str], text: str) -> Path:
-    """原子覆盖写入 ``<workdir>/.agent/WORK.md``，内容原样落盘（C1/C4）。
+    """Atomically overwrite ``<workdir>/.agent/WORK.md`` with the exact text (C1/C4).
 
     Returns:
-        实际写入的路径。
+        The path actually written.
     """
     path = work_memory_path(workdir)
     _atomic_write_text(path, text)
     return path
 
 
-#: 新建工作记忆时的初始内容。
+#: Initial content when creating working memory.
 #:
-#: 刻意保持极简：只是一份骨架，不预设结构。工作记忆是自由文本（C1），
-#: 系统不解析它，所以模板不该暗示任何格式约束。
+#: Deliberately minimal: just a skeleton, no imposed structure. Working memory
+#: is free text (C1) that the system never parses, so the template must not imply
+#: any format constraints.
+#:
+#: Note: this text is model-visible, so it intentionally stays in Chinese.
 WORK_MEMORY_TEMPLATE = """# 工作记忆
 
 > 本文件由 Harness 自动创建，同工作目录的多个会话共享。
@@ -192,48 +203,53 @@ def ensure_working_memory(
     *,
     template: str | None = None,
 ) -> tuple[Path, bool]:
-    """确保工作记忆文件存在；不存在则用模板创建。
+    """Ensure the working-memory file exists, creating it from the template if absent.
 
-    系统提示会告诉模型「本项目存在 ``.agent/WORK.md``」，但从不创建它——
-    模型第一次去读时会拿到「文件不存在」，与提示词自相矛盾。本函数在
-    服务装配阶段补齐这个前提。
+    The system prompt tells the model "this project has ``.agent/WORK.md``" but
+    nothing ever created it -- the model's first read returned "file not found",
+    contradicting the prompt. This function supplies that precondition during
+    service assembly.
 
-    **只在文件缺失时创建**：绝不覆盖已有内容。工作记忆是跨会话共享的，
-    覆盖等于抹掉别的会话刚写下的结论。
+    **Creates only when missing**: never overwrites existing content. Working
+    memory is shared across sessions, so overwriting would erase conclusions
+    another session just wrote.
 
     Args:
-        workdir: 工作目录。
-        template: 初始内容；省略时用 :data:`WORK_MEMORY_TEMPLATE`。
+        workdir: Working directory.
+        template: Initial content; defaults to :data:`WORK_MEMORY_TEMPLATE`.
 
     Returns:
-        ``(路径, 是否新建)``。已存在时返回 ``(路径, False)``。
+        ``(path, created)``. Returns ``(path, False)`` when it already exists.
 
     Raises:
-        ValueError: ``workdir`` 不是有效目录。
-        OSError: 创建失败（权限等），由调用方决定是否降级。
+        ValueError: ``workdir`` is not a valid directory.
+        OSError: Creation failed (permissions, ...); the caller decides whether
+            to degrade.
     """
     base = Path(workdir)
     if not base.is_dir():
-        raise ValueError(f"工作目录不存在或不是目录: {base}")
+        raise ValueError(f"working directory does not exist or is not a directory: {base}")
 
     path = work_memory_path(base)
     if path.is_file():
         return path, False
 
-    # 走原子写：与普通写入共用临时文件 + replace，避免并发创建时留下半截文件
+    # Use the atomic path: share the temp-file + replace flow with normal writes
+    # so concurrent creation never leaves a half-written file.
     _atomic_write_text(path, template if template is not None else WORK_MEMORY_TEMPLATE)
     return path, True
 
 
-# --------------------------------------------------------------- 长期记忆（C7）
+# --------------------------------------------------------- long-term memory (C7)
 
 MemoryText = Annotated[str, Field(min_length=1)]
 
 
 class MemoryEntry(BaseModel):
-    """一条**跨项目通用**结论（C8）。
+    """One **cross-project** conclusion (C8).
 
-    ``source_workdir`` 仅用于溯源，不注入模型上下文（C6）。
+    ``source_workdir`` is for provenance only and is never injected into model
+    context (C6).
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -244,22 +260,23 @@ class MemoryEntry(BaseModel):
 
     @model_validator(mode="after")
     def _normalise(self) -> MemoryEntry:
-        # 去掉首尾空白后再判定合并语义，避免 "x" 与 " x " 重复累积
+        # Trim before deciding merge semantics, so "x" and " x " never accumulate
         object.__setattr__(self, "text", self.text.strip())
         if not self.text:
-            raise ValueError("C8: MemoryEntry.text 不得为空")
+            raise ValueError("C8: MemoryEntry.text must not be empty")
         return self
 
 
 class ProjectMemory(BaseModel):
-    """长期记忆容器：全系统唯一一份（C7）。
+    """Long-term memory container: exactly one system-wide (C7).
 
-    唯一性由路径常量表达：所有工作目录共用
-    :func:`long_term_memory_path` 返回的同一个 ``MEMORY.md``，
-    本类不做多实例管理。
+    Uniqueness is expressed by the path constant: every working directory shares
+    the same ``MEMORY.md`` returned by :func:`long_term_memory_path`, and this
+    class manages no multiple instances.
 
-    写入语义是**只追加合并**：``merge`` 不删除已有条目，也不会
-    在末尾覆盖；相同 ``text`` 视为同一条（不重复追加）。
+    Write semantics are **append-merge only**: ``merge`` never deletes existing
+    entries and never overwrites at the end; identical ``text`` counts as the
+    same entry (no duplicate append).
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -267,13 +284,14 @@ class ProjectMemory(BaseModel):
     entries: list[MemoryEntry] = Field(default_factory=list)
     updated_at: float = 0.0
 
-    # -------------------------------------------------------------- 追加合并
+    # ---------------------------------------------------------- append-merge
 
     def merge(self, new_entries: list[MemoryEntry], now: float) -> int:
-        """把 ``new_entries`` 合并进 ``entries``，返回实际新增条数。
+        """Merge ``new_entries`` into ``entries``; returns the number actually added.
 
-        相同 ``text`` 的条目视为已存在：不重复追加，也不改动原有条目
-        （保持 ``source_workdir`` / ``updated_at`` 的首次来源）。
+        Entries with identical ``text`` count as already present: no duplicate
+        append and no modification of the existing entry (preserving the first
+        ``source_workdir`` / ``updated_at``).
         """
         existing = {entry.text for entry in self.entries}
         added = 0
@@ -287,11 +305,11 @@ class ProjectMemory(BaseModel):
             self.updated_at = now
         return added
 
-    # -------------------------------------------------------------- 持久化
+    # --------------------------------------------------------------- storage
 
     @staticmethod
     def load(path: str | os.PathLike[str]) -> ProjectMemory:
-        """从 ``MEMORY.md`` 读取长期记忆；文件不存在时返回空容器。"""
+        """Load long-term memory from ``MEMORY.md``; a missing file yields an empty container."""
         file = Path(path)
         raw = _read_text_with_retry(file)
         if raw is None or not raw.strip():
@@ -299,18 +317,18 @@ class ProjectMemory(BaseModel):
         return ProjectMemory.model_validate_json(raw)
 
     def save_atomic(self, path: str | os.PathLike[str]) -> Path:
-        """原子写回 ``MEMORY.md``（临时文件 + ``os.replace``）。"""
+        """Atomically write back ``MEMORY.md`` (temp file + ``os.replace``)."""
         file = Path(path)
         payload = json.dumps(self.model_dump(mode="json"), ensure_ascii=False, indent=2)
         _atomic_write_text(file, payload + "\n")
         return file
 
 
-# ------------------------------------------------------------ 结算提取（C5）
+# ------------------------------------------------------- settlement extraction (C5)
 
 MemoryExtractionStatus = Literal["pending", "running", "done", "failed"]
 
-#: 合法状态迁移：pending → running → done / failed
+#: Legal transitions: pending -> running -> done / failed
 _LEGAL_TRANSITIONS: dict[str, frozenset[str]] = {
     "pending": frozenset({"running"}),
     "running": frozenset({"done", "failed"}),
@@ -320,28 +338,28 @@ _LEGAL_TRANSITIONS: dict[str, frozenset[str]] = {
 
 
 class MemoryTransitionError(HarnessError):
-    """``MemoryExtraction`` 非法状态迁移。"""
+    """An illegal ``MemoryExtraction`` state transition."""
 
     def __init__(self, source: str, target: str) -> None:
         self.source = source
         self.target = target
-        super().__init__(f"非法的提取状态迁移: {source} -> {target}")
+        super().__init__(f"illegal extraction state transition: {source} -> {target}")
 
 
 def extraction_transition(
     extraction: MemoryExtraction, target: MemoryExtractionStatus
 ) -> MemoryExtraction:
-    """执行一次状态迁移并返回新对象；非法迁移抛 :class:`MemoryTransitionError`。"""
+    """Perform one state transition and return the new object; illegal transitions raise."""
     if target not in _LEGAL_TRANSITIONS[extraction.status]:
         raise MemoryTransitionError(extraction.status, target)
     return extraction.model_copy(update={"status": target})
 
 
 class MemoryExtraction(BaseModel):
-    """结算提取任务（用户显式触发的后台任务，不阻塞主循环，C5）。
+    """A settlement-extraction task (a background task the user triggers explicitly; never blocks the loop, C5).
 
-    状态机：``pending → running → done | failed``；
-    ``done`` / ``failed`` 为终态，不可再迁移。
+    State machine: ``pending -> running -> done | failed``; ``done`` and
+    ``failed`` are terminal and cannot transition further.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -353,21 +371,22 @@ class MemoryExtraction(BaseModel):
 
     @property
     def is_terminal(self) -> bool:
-        """是否已到终态。"""
+        """Whether the state is terminal."""
         return self.status in ("done", "failed")
 
     def can_transition_to(self, target: MemoryExtractionStatus) -> bool:
-        """判断迁移是否合法。"""
+        """Whether the transition is legal."""
         return target in _LEGAL_TRANSITIONS[self.status]
 
     def transition_to(self, target: MemoryExtractionStatus) -> MemoryExtraction:
-        """迁移到 ``target``，非法迁移抛 :class:`MemoryTransitionError`。
+        """Transition to ``target``; illegal transitions raise :class:`MemoryTransitionError`.
 
         Returns:
-            迁移后的新实例（原实例不被修改）。
+            The new instance (the original is not modified).
         """
         return extraction_transition(self, target)
 
 
-#: 解析提取任务时的转换函数签名（供后台线程回调使用）
+#: Signature of the conversion function for extraction tasks (for background
+#: thread callbacks)
 ExtractionRunner = Callable[[MemoryExtraction], MemoryExtraction]
