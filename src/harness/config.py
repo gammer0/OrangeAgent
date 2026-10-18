@@ -1,20 +1,23 @@
-"""从环境变量加载 LLM 配置并构建反向代理。
+"""Load LLM configuration from environment variables and build the reverse proxy.
 
-对应文档：docs/01-系统架构设计.md §9（配置项）
+See docs/01-architecture.md §9 (configuration items).
 
-约定：
+Conventions:
 
-* 密钥**只从环境变量读取**，不写入代码、不写入日志、不进入 ``repr``。
-* 依赖 ``python-dotenv`` 在加载时读取工作目录下的 ``.env``；已存在的真实环境变量
-  优先级更高（``override=False``），便于 CI 注入。
-* 只提供 OpenAI 兼容端点（DeepSeek / Moonshot / vLLM / OpenAI 同一套协议）；
-  需要 Anthropic 协议时显式传 ``adapter``。
+* Secrets are **read from environment variables only**; they are never written
+  into code, logs or ``repr``.
+* ``python-dotenv`` reads the ``.env`` in the working directory at load time;
+  real environment variables already set take precedence (``override=False``),
+  which suits CI injection.
+* Only OpenAI-compatible endpoints are provided (DeepSeek / Moonshot / vLLM /
+  OpenAI share the same protocol); pass ``adapter`` explicitly for the
+  Anthropic protocol.
 
-用法::
+Usage::
 
     from harness.config import load_llm_config, build_proxy_from_env
 
-    cfg = load_llm_config()          # 缺 key 时抛 ConfigError
+    cfg = load_llm_config()          # raises ConfigError when the key is missing
     proxy = build_proxy_from_env()
     proxy.chat(messages, session_id="s1")
 """
@@ -43,7 +46,7 @@ __all__ = [
     "load_dotenv_if_present",
 ]
 
-#: 环境变量名（与 ``.env.example`` 保持一致）。
+#: Environment variable names (kept in sync with ``.env.example``).
 ENV_API_KEY = "DEEPSEEK_API_KEY"
 ENV_BASE_URL = "DEEPSEEK_BASE_URL"
 ENV_MODEL = "DEEPSEEK_MODEL"
@@ -52,36 +55,39 @@ ENV_MAX_TOKENS = "LLM_MAX_TOKENS"
 ENV_TIMEOUT = "LLM_TIMEOUT"
 ENV_MAX_RETRIES = "LLM_MAX_RETRIES"
 
-#: 兜底默认值（密钥除外——缺失即报错，绝不使用占位符静默运行）。
+#: Fallback defaults (except the key -- a missing key is an error, never a
+#: placeholder that lets the system run silently).
 DEFAULT_BASE_URL = "https://api.deepseek.com"
 DEFAULT_MODEL = "deepseek-chat"
 DEFAULT_TEMPERATURE = 0.7
-#: 单次输出上限。
-#: ponytail: 4096 不够用——实测 agent 写一个 100 行的文件时，参数长度
-#: 正好撞上 4096 被截断（`_rjust(` 处断掉），导致写入不完整。
-#: DeepSeek 系列支持 8192，宁大勿小；成本只与实际生成量相关。
+#: Per-call output limit.
+#: Note: 4096 is not enough -- we measured the agent writing a 100-line file
+#: hitting the 4096 cap mid-argument (truncated at ``_rjust(``), leaving an
+#: incomplete write. DeepSeek supports 8192; better too large than too small,
+#: since cost tracks actual generation only.
 DEFAULT_MAX_TOKENS = 8192
 DEFAULT_TIMEOUT = 60.0
 DEFAULT_MAX_RETRIES = 2
 
 
 class ConfigError(RuntimeError):
-    """配置缺失或非法。
+    """Configuration is missing or invalid.
 
-    错误信息只说明**哪个变量缺失**，绝不回显变量值。
+    Error messages state **which variable is missing** and never echo its value.
     """
 
 
 @dataclass(frozen=True, slots=True)
 class LLMConfig:
-    """一次模型接入所需的全部配置。
+    """Everything needed to attach one model endpoint.
 
     Attributes:
-        api_key: 密钥；``repr`` 中被掩码，不会出现在日志里。
-        base_url: OpenAI 兼容端点基址。
-        model: 模型名。
-        temperature / max_tokens / timeout / max_retries: 生成与重试参数。
-        endpoint: 具体路径，默认 ``/chat/completions``。
+        api_key: Secret; masked in ``repr`` and never logged.
+        base_url: OpenAI-compatible endpoint base URL.
+        model: Model name.
+        temperature / max_tokens / timeout / max_retries: Generation and retry
+            parameters.
+        endpoint: Concrete path, default ``/chat/completions``.
     """
 
     api_key: str = field(repr=False)
@@ -94,7 +100,7 @@ class LLMConfig:
     endpoint: str = "/chat/completions"
 
     def masked_key(self) -> str:
-        """返回可用于日志的掩码密钥（仅保留首尾 4 位）。"""
+        """Return a log-safe masked key (first and last 4 characters only)."""
         key = self.api_key
         if len(key) <= 8:
             return "***"
@@ -102,17 +108,18 @@ class LLMConfig:
 
 
 def load_dotenv_if_present(dotenv_path: str | Path | None = None) -> None:
-    """若存在 ``.env`` 则加载到环境变量（不覆盖已存在的值）。
+    """Load ``.env`` into the environment if present (never overriding existing values).
 
-    ``python-dotenv`` 是项目已声明的依赖；缺失时静默跳过，由调用方从
-    真实环境变量读取——这正是 CI 场景。
+    ``python-dotenv`` is a declared project dependency; when it is missing we
+    skip silently and let the caller read real environment variables -- exactly
+    the CI scenario.
     """
     path = Path(dotenv_path) if dotenv_path is not None else Path.cwd() / ".env"
     if not path.is_file():
         return
     try:
         from dotenv import load_dotenv
-    except ImportError:  # pragma: no cover - 依赖已声明，仅防御
+    except ImportError:  # pragma: no cover - dependency declared; defensive only
         return
     load_dotenv(dotenv_path=path, override=False)
 
@@ -138,16 +145,18 @@ def _env_int(name: str, default: int) -> int:
 
 
 def load_llm_config(*, dotenv_path: str | Path | None = None) -> LLMConfig:
-    """从环境变量构造 :class:`LLMConfig`。
+    """Build an :class:`LLMConfig` from environment variables.
 
     Args:
-        dotenv_path: 可选的 ``.env`` 路径；省略时使用当前工作目录下的 ``.env``。
+        dotenv_path: Optional ``.env`` path; defaults to ``.env`` in the current
+            working directory.
 
     Returns:
-        配置对象；``api_key`` 在 ``repr`` 中已掩码。
+        The configuration object; ``api_key`` is masked in ``repr``.
 
     Raises:
-        ConfigError: 缺少 ``DEEPSEEK_API_KEY``，或数值型变量非法。
+        ConfigError: ``DEEPSEEK_API_KEY`` is missing, or a numeric variable is
+            invalid.
     """
     load_dotenv_if_present(dotenv_path)
 
@@ -181,16 +190,18 @@ def build_proxy(
     window_s: int = 60,
     transport: object | None = None,
 ) -> ReverseProxy:
-    """按配置构建 :class:`ReverseProxy`。
+    """Build a :class:`ReverseProxy` from the configuration.
 
     Args:
-        config: 已加载的配置。
-        adapter: 适配器；省略时用 :class:`OpenAIAdapter`。
-        max_requests / max_tokens_per_window / window_s: 全局限流参数。
-        transport: 可选的传输实现；省略时用真实 HTTP（``OpenAITransport``）。
+        config: Loaded configuration.
+        adapter: Adapter; defaults to :class:`OpenAIAdapter`.
+        max_requests / max_tokens_per_window / window_s: Global rate-limit
+            parameters.
+        transport: Optional transport implementation; defaults to real HTTP
+            (``OpenAITransport``).
 
     Returns:
-        可直接调用的反向代理实例。
+        A ready-to-use reverse proxy instance.
     """
     chosen = adapter or OpenAIAdapter()
     if transport is None:
@@ -224,5 +235,5 @@ def build_proxy(
 
 
 def build_proxy_from_env(**kwargs: object) -> ReverseProxy:
-    """便捷入口：读环境变量并直接构建代理。"""
+    """Convenience entry point: read the environment and build the proxy."""
     return build_proxy(load_llm_config(), **kwargs)  # type: ignore[arg-type]
