@@ -13,6 +13,20 @@ from harness.config import (
 
 
 class TestLoadConfig:
+    @pytest.fixture(autouse=True)
+    def _isolate_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """dotenv 会真实写入 os.environ，必须显式清理，避免污染其它用例。"""
+        for name in (
+            "DEEPSEEK_API_KEY",
+            "DEEPSEEK_BASE_URL",
+            "DEEPSEEK_MODEL",
+            "LLM_TEMPERATURE",
+            "LLM_MAX_TOKENS",
+            "LLM_TIMEOUT",
+            "LLM_MAX_RETRIES",
+        ):
+            monkeypatch.delenv(name, raising=False)
+
     def test_reads_all_env_vars(self, monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
         monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-abcdef1234567890")
         monkeypatch.setenv("DEEPSEEK_BASE_URL", "https://api.example.com/")
