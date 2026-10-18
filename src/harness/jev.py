@@ -1,21 +1,26 @@
-"""Jev 路由：工具分支选择 + 低置信回退（§4.4）。
+"""Jev routing: tool-branch selection with low-confidence fallback (§4.4).
 
-对应文档：
+See:
 
-* docs/01-系统架构设计.md §4.4（启用条件、Jev 规格、失败即回退）
-* docs/02-数据结构设计/08-运行时状态.md（``RouteDecision`` 与 F2）
+* docs/01-architecture.md §4.4 (enable conditions, Jev spec, fall back on failure)
+* docs/02-data-structures/08-runtime-state.md (``RouteDecision`` and F2)
 
-设计要点：
+Design notes:
 
-* **路由是优化，不是关键路径**（I4）：任何异常、低置信、超时都必须无损退化为
-  "全量暴露"，绝不阻断主流程。
-* **``state`` 只放 query，不放工具输出**——防止历史工具结果干扰路由判定。
-* **由主模型代为执行路由**：不引入外部 Jev 服务。用同一条模型通道发一个
-  极小的选择请求，把候选分支编号列进 prompt，要求模型只回一个编号。
-  主模型不可用时直接回退，不做二次尝试。
+* **Routing is an optimization, not the critical path** (I4): any exception, low
+  confidence or timeout must degrade losslessly to "expose everything" and must
+  never block the main flow.
+* **``state`` carries the query only, never tool output** -- this prevents
+  historical tool results from skewing the routing decision.
+* **The main model performs routing on our behalf**: no external Jev service.
+  We send one tiny selection request over the same model channel, list the
+  candidate branch numbers in the prompt, and ask the model to reply with a
+  single number. When the main model is unavailable we fall back immediately
+  instead of retrying.
 
-启用条件（文档 §4.4）：``tool_count >= 30`` 且 ``branch_count >= 6`` 且
-``history_tokens > 4000``。三个条件任一不满足就不路由——少量工具查树纯亏推理。
+Enable conditions (design doc §4.4): ``tool_count >= 30`` and
+``branch_count >= 6`` and ``history_tokens > 4000``. If any condition fails we
+skip routing -- searching a tree of few tools is pure inference loss.
 """
 
 from __future__ import annotations
@@ -39,16 +44,16 @@ __all__ = [
     "parse_route_reply",
 ]
 
-#: 文档配置项 ``JEV_ROUTE_ENABLE_THRESHOLD``。
+#: Config item ``JEV_ROUTE_ENABLE_THRESHOLD``.
 ROUTE_ENABLE_TOOL_COUNT = 30
-#: 分支数下限（文档 §4.4）。
+#: Minimum branch count (design doc §4.4).
 ROUTE_ENABLE_BRANCH_COUNT = 6
-#: 历史 token 下限（文档 §4.4）。
+#: Minimum history tokens (design doc §4.4).
 ROUTE_ENABLE_HISTORY_TOKENS = 4000
-#: 置信度低于该值即回退全量（文档 §4.4）。
+#: Fall back to the full tree below this confidence (design doc §4.4).
 CONFIDENCE_THRESHOLD = 0.7
 
-#: 模型回复中提取编号：容忍 ``B3`` / ``3`` / ``branch 3`` 等写法。
+#: Extract a number from the model reply; tolerates ``B3`` / ``3`` / ``branch 3``.
 _BRANCH_PATTERN = re.compile(r"(?:^|[^A-Za-z0-9])(?:B)?(\d{1,3})(?![0-9])")
 
 
@@ -58,7 +63,7 @@ def should_route(
     branch_count: int,
     history_tokens: int,
 ) -> bool:
-    """是否满足路由启用条件（三个阈值同时满足）。"""
+    """Whether the routing enable conditions hold (all three thresholds met)."""
     return (
         tool_count >= ROUTE_ENABLE_TOOL_COUNT
         and branch_count >= ROUTE_ENABLE_BRANCH_COUNT
@@ -67,16 +72,20 @@ def should_route(
 
 
 def build_route_prompt(query: str, branches: Sequence[str]) -> str:
-    """构造路由选择提示。
+    """Build the routing-selection prompt.
 
-    **只放 query 与候选分支名**，不放任何工具输出（防 JPDH）。
+    Carries **only the query and candidate branch names**, never any tool output
+    (guards against JPDH).
 
     Args:
-        query: 用户本轮请求文本。
-        branches: 候选一级分支路径列表。
+        query: The user's request text for this turn.
+        branches: Candidate top-level branch paths.
 
     Returns:
-        可直接作为单条 ``UserMsg`` 发给模型的提示文本。
+        Prompt text usable directly as a single ``UserMsg``.
+
+    Note:
+        The prompt text is model-facing and intentionally stays in Chinese.
     """
     listing = "\n".join(f"{index}. {path}" for index, path in enumerate(branches, start=1))
     return (
@@ -88,16 +97,18 @@ def build_route_prompt(query: str, branches: Sequence[str]) -> str:
 
 
 def parse_route_reply(reply: str, branches: Sequence[str]) -> RouteDecision:
-    """解析模型回复为 ``RouteDecision``。
+    """Parse a model reply into a ``RouteDecision``.
 
-    解析失败或越界一律返回回退决策（F2：``branch is None`` 时 ``fallback=True``）。
+    Parse failures and out-of-range numbers always yield the fallback decision
+    (F2: ``fallback=True`` when ``branch is None``).
 
     Args:
-        reply: 模型原始回复文本。
-        branches: 候选分支列表，与提示中的编号一一对应（从 1 起）。
+        reply: Raw reply text from the model.
+        branches: Candidate branches, aligned with the prompt numbering (1-based).
 
     Returns:
-        有效编号返回 ``confidence=1.0`` 的选择；否则返回回退决策。
+        A selection with ``confidence=1.0`` for a valid number; otherwise the
+        fallback decision.
     """
     match = _BRANCH_PATTERN.search(reply.strip())
     if match is None:
@@ -112,14 +123,12 @@ def parse_route_reply(reply: str, branches: Sequence[str]) -> RouteDecision:
 
 @dataclass
 class JevRouter:
-    """由主模型代为执行的路由器。
+    """A router that delegates the decision to the main model.
 
     Attributes:
-        chat: 依赖注入的单轮模型调用，签名为
-            ``(messages: list[Message]) -> AssistantMsg``。
-        confidence_threshold: 低于该置信度回退全量。
-        history_tokens_provider: 可选回调，返回当前历史 token 数；
-            省略时由调用方直接传入 ``history_tokens``。
+        chat: Injected single-turn model call with signature
+            ``(messages: list[Message]) -> AssistantMsg``.
+        confidence_threshold: Fall back to the full tree below this confidence.
     """
 
     chat: Callable[[list[Message]], AssistantMsg]
@@ -133,17 +142,17 @@ class JevRouter:
         history_tokens: int = ROUTE_ENABLE_HISTORY_TOKENS,
         tool_count: int = ROUTE_ENABLE_TOOL_COUNT,
     ) -> RouteDecision:
-        """选择工具分支；任何失败都回退全量（I4）。
+        """Select a tool branch; any failure falls back to the full tree (I4).
 
         Args:
-            query: 用户请求文本。
-            branches: 候选一级分支路径列表。
-            history_tokens: 当前历史 token 数（用于启用条件判定）。
-            tool_count: 当前工具总数（用于启用条件判定）。
+            query: The user's request text.
+            branches: Candidate top-level branch paths.
+            history_tokens: Current history token count (for the enable check).
+            tool_count: Current total tool count (for the enable check).
 
         Returns:
-            :class:`RouteDecision`；不满足启用条件或调用失败时
-            ``branch is None`` 且 ``fallback is True``。
+            A :class:`RouteDecision`; when the enable conditions fail or the call
+            fails, ``branch is None`` and ``fallback is True``.
         """
         if not branches:
             return RouteDecision.full(confidence=0.0)
@@ -153,14 +162,14 @@ class JevRouter:
             branch_count=len(branches),
             history_tokens=history_tokens,
         ):
-            # 未达启用条件：不做路由，等价于全量（保守）
+            # Enable conditions not met: skip routing, equivalent to full exposure
             return RouteDecision.full(confidence=0.0)
 
         prompt = build_route_prompt(query, branches)
         try:
             reply = self.chat([UserMsg(content=prompt)])
         except Exception:
-            # 路由失败不得阻断主流程（I4）
+            # A routing failure must not block the main flow (I4)
             return RouteDecision.full(confidence=0.0)
 
         decision = parse_route_reply(reply.content or "", branches)
@@ -173,14 +182,14 @@ class JevRouter:
         decision: RouteDecision,
         branches: Sequence[str],
     ) -> list[str]:
-        """按决策筛选分支：回退时返回全量（F2 的消费端）。
+        """Filter branches by the decision; a fallback returns everything (F2 consumer).
 
         Args:
-            decision: 路由结果。
-            branches: 全部候选分支。
+            decision: Routing result.
+            branches: All candidate branches.
 
         Returns:
-            需要暴露给模型的分支列表。
+            The branch list to expose to the model.
         """
         if decision.fallback or decision.branch is None:
             return list(branches)
@@ -188,15 +197,16 @@ class JevRouter:
 
 
 def parse_route_json(text: str) -> RouteDecision | None:
-    """尝试把回复解析为 ``{"branch": ..., "confidence": ...}`` 形式。
+    """Try to parse the reply as ``{"branch": ..., "confidence": ...}``.
 
-    仅作为容错路径：模型偶尔会返回 JSON 而不是纯编号。
+    A tolerance path only: the model occasionally returns JSON instead of a
+    bare number.
 
     Args:
-        text: 模型回复。
+        text: Model reply.
 
     Returns:
-        解析成功返回决策，否则 ``None``。
+        A decision on success, otherwise ``None``.
     """
     try:
         payload = json.loads(text)

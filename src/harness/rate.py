@@ -1,16 +1,19 @@
-"""模型层运行时：限流与健康状态（ADT-10，K 组）。
+"""Model-layer runtime: rate limiting and health state (ADT-10, group K).
 
-对应文档：docs/02-数据结构设计/10-模型层.md
+See docs/02-data-structures/10-model-layer.md.
 
-多会话共享同一个 ``ReverseProxy``，因此限流窗口与健康状态都是**全局**的。
+Multiple sessions share one ``ReverseProxy``, so both the rate window and the
+health state are **global**.
 
-* K1：只做全局速率窗口，不做每会话并发限制。
-* K2：每个 ``RateEvent`` 必须携带 ``session_id``。
-* K3：窗口淘汰只按 ``ts`` 滑出，不按会话。
-* K4：``ProviderHealth`` 全局单例，退避与故障转移对所有会话生效。
-* K5：``state != "healthy"`` 期间的失败不重复累加 ``consecutive_failures``。
+* K1: global rate windows only; no per-session concurrency limit.
+* K2: every ``RateEvent`` must carry a ``session_id``.
+* K3: window eviction slides out by ``ts`` only, never by session.
+* K4: ``ProviderHealth`` is a global singleton; backoff and failover apply to
+  every session.
+* K5: failures during ``state != "healthy"`` do not increment
+  ``consecutive_failures`` again.
 
-所有状态读写均由 ``threading.Lock`` 保护。
+All state access is guarded by ``threading.Lock``.
 """
 
 from __future__ import annotations
@@ -35,14 +38,14 @@ Decision = Literal["allow", "retry_after", "fail_fast"]
 ProviderState = Literal["healthy", "degraded", "down"]
 
 
-# ------------------------------------------------------------------- 限流
+# ------------------------------------------------------------ rate limiting
 
 
 class RateEvent(BaseModel):
-    """窗口内的单次请求记录。
+    """A single request record inside the window.
 
-    ``tokens`` 为请求前估算；``actual_tokens`` 由 :meth:`RateWindow.record_actual`
-    在响应后回填。
+    ``tokens`` is the pre-request estimate; ``actual_tokens`` is backfilled by
+    :meth:`RateWindow.record_actual` after the response arrives.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -54,9 +57,9 @@ class RateEvent(BaseModel):
 
 
 class RateWindow:
-    """滑动窗口限速器（全局一份）。
+    """Sliding-window rate limiter (one global instance).
 
-    线程安全：所有读写都在 ``self._lock`` 内完成。
+    Thread safety: every read and write happens inside ``self._lock``.
     """
 
     def __init__(self, max_requests: int, max_tokens: int, window_s: int = 60) -> None:
@@ -64,22 +67,22 @@ class RateWindow:
         max_tokens = int(max_tokens)
         window_s = int(window_s)
         if max_requests <= 0:
-            raise ValueError("max_requests 必须为正整数")
+            raise ValueError("max_requests must be a positive integer")
         if max_tokens <= 0:
-            raise ValueError("max_tokens 必须为正整数")
+            raise ValueError("max_tokens must be a positive integer")
         if window_s <= 0:
-            raise ValueError("window_s 必须为正整数")
+            raise ValueError("window_s must be a positive integer")
         self.window_s = window_s
         self.max_requests = max_requests
         self.max_tokens = max_tokens
         self._events: deque[RateEvent] = deque()
         self._lock = threading.Lock()
 
-    # ---------------------------------------------------------------- 视图
+    # ---------------------------------------------------------------- views
 
     @property
     def events(self) -> list[RateEvent]:
-        """窗口内事件的快照，按 ``ts`` 升序。"""
+        """Snapshot of the window's events, ordered by ascending ``ts``."""
         with self._lock:
             return list(self._events)
 
@@ -87,38 +90,38 @@ class RateWindow:
         with self._lock:
             return len(self._events)
 
-    # ---------------------------------------------------------------- 淘汰
+    # ------------------------------------------------------------- eviction
 
     def _evict_locked(self, now: float) -> None:
-        """滑出 ``ts <= now - window_s`` 的事件（K3：只按 ts，不按会话）。"""
+        """Slide out events with ``ts <= now - window_s`` (K3: by ts only, never by session)."""
         cutoff = now - self.window_s
         events = self._events
         while events and events[0].ts <= cutoff:
             events.popleft()
 
     def _used_tokens_locked(self) -> int:
-        """窗口内已占用 token 总数（回填优先使用 actual_tokens）。"""
+        """Total tokens occupied in the window (``actual_tokens`` preferred when present)."""
         total = 0
         for event in self._events:
             total += event.actual_tokens if event.actual_tokens is not None else event.tokens
         return total
 
-    # ---------------------------------------------------------------- 获取
+    # ---------------------------------------------------------------- acquire
 
     def try_acquire(self, session_id: str, tokens: int, now: float) -> bool:
-        """尝试占用一个请求名额；窗口已满则拒绝并返回 ``False``。
+        """Try to claim one request slot; returns ``False`` when the window is full.
 
-        拒绝时不写入事件，因此不会污染窗口。
+        On rejection no event is written, so the window is left untouched.
 
         Args:
-            session_id: 发起请求的会话（K2）。
-            tokens: 请求前估算的 token 数。
-            now: 当前时间戳（Unix 秒）。
+            session_id: Session making the request (K2).
+            tokens: Pre-request token estimate.
+            now: Current timestamp (Unix seconds).
         """
         if not session_id:
-            raise ValueError("K2: session_id 不得为空")
+            raise ValueError("K2: session_id must not be empty")
         if tokens < 0:
-            raise ValueError("tokens 不得为负")
+            raise ValueError("tokens must not be negative")
         with self._lock:
             self._evict_locked(now)
             if len(self._events) + 1 > self.max_requests:
@@ -128,23 +131,24 @@ class RateWindow:
             self._events.append(RateEvent(ts=now, session_id=session_id, tokens=tokens))
             return True
 
-    # ---------------------------------------------------------------- 回填
+    # ------------------------------------------------------------ backfill
 
     def record_actual(self, session_id: str, actual_tokens: int, now: float | None = None) -> bool:
-        """把某会话**最早一条**未回填事件的 ``actual_tokens`` 回填（K2）。
+        """Backfill ``actual_tokens`` on the session's **earliest** unfilled event (K2).
 
-        回填按 ``session_id`` 匹配，因此并发会话的记录不会互相串写。
-        未找到可回填事件时返回 ``False``。
+        Backfill matches by ``session_id``, so concurrent sessions never write
+        into each other's records. Returns ``False`` when nothing is available
+        to backfill.
 
         Args:
-            session_id: 会话 id。
-            actual_tokens: 响应后得到的真实 token 数。
-            now: 当前时间戳；传入时会先滑出窗口再回填。
+            session_id: Session id.
+            actual_tokens: Real token count obtained after the response.
+            now: Current timestamp; when given, the window is evicted first.
         """
         if not session_id:
-            raise ValueError("K2: session_id 不得为空")
+            raise ValueError("K2: session_id must not be empty")
         if actual_tokens < 0:
-            raise ValueError("actual_tokens 不得为负")
+            raise ValueError("actual_tokens must not be negative")
         with self._lock:
             if now is not None:
                 self._evict_locked(now)
@@ -155,26 +159,28 @@ class RateWindow:
             return False
 
 
-# --------------------------------------------------------------- 健康状态
+# -------------------------------------------------------------- health state
 
-#: K4：全局单例注册表。键为 provider 名，所有会话共享同一实例。
+#: K4: global singleton registry. Keys are provider names; all sessions share
+#: the same instance.
 _REGISTRY: dict[str, ProviderHealth] = {}
 _REGISTRY_LOCK = threading.Lock()
 
 
 class ProviderHealth:
-    """单个 provider 的全局健康状态（K4：全局单例）。
+    """Global health state of a single provider (K4: global singleton).
 
-    单例语义：一个 provider 名在整个进程内只对应一份状态，
-    请通过 :func:`get_provider_health` 获取，**不要**自行构造实例，
-    否则退避与故障转移不会对所有会话生效。
+    Singleton semantics: one provider name maps to exactly one state within the
+    process. Obtain it via :func:`get_provider_health` and **do not** construct
+    instances yourself, otherwise backoff and failover will not apply to every
+    session.
     """
 
     def __init__(
         self, provider: str, *, failure_threshold: int = 3, backoff_s: float = 30.0
     ) -> None:
         if not provider:
-            raise ValueError("provider 不得为空")
+            raise ValueError("provider must not be empty")
         self.provider = provider
         self.state: ProviderState = "healthy"
         self.consecutive_failures = 0
@@ -184,14 +190,14 @@ class ProviderHealth:
         self.backoff_s = float(backoff_s)
         self._lock = threading.Lock()
 
-    # ---------------------------------------------------------------- 判定
+    # ------------------------------------------------------------- decisions
 
     def can_send(self, now: float) -> Decision:
-        """发送前检查。
+        """Pre-send check.
 
         Returns:
-            ``"allow"`` 正常发送；``"retry_after"`` 需等待 ``retry_after``；
-            ``"fail_fast"`` 直接失败不重试。
+            ``"allow"`` to send normally; ``"retry_after"`` to wait for
+            ``retry_after``; ``"fail_fast"`` to fail immediately without retry.
         """
         with self._lock:
             if self.state == "healthy":
@@ -200,10 +206,10 @@ class ProviderHealth:
                 return "allow" if now >= self.retry_after else "retry_after"
             return "fail_fast"
 
-    # ---------------------------------------------------------------- 迁移
+    # ------------------------------------------------------------ transitions
 
     def on_success(self) -> None:
-        """一次成功调用：清零失败计数并恢复 ``healthy``。"""
+        """A successful call: reset the failure count and return to ``healthy``."""
         with self._lock:
             self.consecutive_failures = 0
             self.state = "healthy"
@@ -211,22 +217,23 @@ class ProviderHealth:
             self.switched_to = None
 
     def on_failure(self, now: float, threshold: int | None = None) -> ProviderState:
-        """一次失败调用，返回迁移后的状态。
+        """A failed call; returns the state after the transition.
 
-        K5：``state != "healthy"`` 期间不重复累加 ``consecutive_failures``，
-        但会延长 ``retry_after``，使退避持续生效。
+        K5: during ``state != "healthy"`` the failure count is not incremented
+        again, but ``retry_after`` is extended so backoff keeps applying.
 
         Args:
-            now: 当前时间戳。
-            threshold: 本次调用的失败阈值，缺省用实例配置。
+            now: Current timestamp.
+            threshold: Failure threshold for this call; defaults to the instance
+                configuration.
         """
         limit = max(1, int(threshold if threshold is not None else self.failure_threshold))
         with self._lock:
             if self.state == "down":
-                # K5：down 期间不累加；仅保持 fail-fast
+                # K5: no increment while down; keep failing fast
                 return self.state
             if self.state == "degraded":
-                # K5：不重复累加，但刷新退避截止时间
+                # K5: no re-increment, but refresh the backoff deadline
                 self.retry_after = now + self.backoff_s
                 return self.state
             self.consecutive_failures += 1
@@ -236,15 +243,15 @@ class ProviderHealth:
             return self.state
 
     def mark_down(self, switched_to: str | None = None) -> None:
-        """显式降级为 ``down``（例如故障转移已选定目标）。"""
+        """Explicitly degrade to ``down`` (e.g. a failover target has been chosen)."""
         with self._lock:
             self.state = "down"
             self.switched_to = switched_to
 
-    # ---------------------------------------------------------------- 快照
+    # -------------------------------------------------------------- snapshot
 
     def snapshot(self) -> dict[str, object]:
-        """线程安全的只读快照。"""
+        """Thread-safe read-only snapshot."""
         with self._lock:
             return {
                 "provider": self.provider,
@@ -265,10 +272,11 @@ class ProviderHealth:
 def get_provider_health(
     provider: str, *, failure_threshold: int = 3, backoff_s: float = 30.0
 ) -> ProviderHealth:
-    """获取（必要时创建）provider 的全局单例健康状态（K4）。
+    """Get (creating if needed) a provider's global singleton health state (K4).
 
-    同一 ``provider`` 名重复调用返回**同一对象**；首次创建时的
-    ``failure_threshold`` / ``backoff_s`` 生效，后续参数被忽略。
+    Repeated calls with the same ``provider`` name return **the same object**;
+    ``failure_threshold`` / ``backoff_s`` only take effect on first creation and
+    later arguments are ignored.
     """
     with _REGISTRY_LOCK:
         health = _REGISTRY.get(provider)
@@ -281,6 +289,6 @@ def get_provider_health(
 
 
 def reset_provider_health_registry() -> None:
-    """清空全局注册表（仅供测试使用）。"""
+    """Clear the global registry (test use only)."""
     with _REGISTRY_LOCK:
         _REGISTRY.clear()
