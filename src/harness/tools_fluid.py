@@ -1,14 +1,15 @@
-"""流体仿真验收工具：物理约束的客观检查。
+"""Fluid-simulation acceptance tools: objective checks of physical constraints.
 
-设计原则：不 import pygame、不需要窗口，直接驱动 ``fluid.core.ParticleSystem``
-的无头接口，因此可以在 CI 里跑。
+Design principle: no pygame import, no window required -- these tools drive the
+headless interface of ``fluid.core.ParticleSystem`` directly, so they run in CI.
 
-检查项对应 ``.agent/skills/fluid-particle-sim/SKILL.md`` 的「物理要求」：
-1. 不可压缩性（平均间距 >= 1.6x 半径）
-2. 质量守恒（粒子数不变）
-3. 边界与固体（越界数为 0）
-4. 重力与静置（动能下降 >= 60%）
-5. 无 NaN / 无数值爆炸
+The checks mirror the "physical requirements" in
+``.agent/skills/fluid-particle-sim/SKILL.md``:
+1. Incompressibility (mean spacing >= 1.6x radius)
+2. Mass conservation (particle count unchanged)
+3. Boundaries and solids (zero out-of-bounds particles)
+4. Gravity and settling (kinetic energy drops by >= 60%)
+5. No NaN / no numerical explosion
 """
 
 from __future__ import annotations
@@ -21,7 +22,7 @@ from pathlib import Path
 
 __all__ = ["fluid_check", "fluid_probe"]
 
-#: 探测脚本：在子进程里导入被测项目并输出 JSON。
+#: Probe script: imports the project under test in a child process and prints JSON.
 _PROBE = r'''
 import importlib, json, math, os, sys
 
@@ -53,7 +54,7 @@ for module_name, cls_name in CANDIDATES:
         break
 
 if cls is None:
-    print(json.dumps({"ok": False, "reason": "找不到 ParticleSystem"}, ensure_ascii=False))
+    print(json.dumps({"ok": False, "reason": "ParticleSystem not found"}, ensure_ascii=False))
     raise SystemExit(3)
 
 W, H = 400, 300
@@ -61,7 +62,7 @@ RADIUS = 6.0
 
 def make():
     sysm = cls(W, H, seed=7)
-    sysm.add_solid((150.0, 200.0, 120.0, 12.0))   # 一块地板状固体
+    sysm.add_solid((150.0, 200.0, 120.0, 12.0))   # a floor-like solid
     sysm.add_water(200.0, 80.0, 40.0, 300)
     return sysm
 
@@ -126,7 +127,7 @@ try:
                 result["out_of_solid"] += 1
                 break
 
-    # 邻域最小间距（抽样 80 个粒子，避免 O(n^2) 太慢）
+    # Minimum neighbor spacing (sample 80 particles to avoid slow O(n^2))
     sample = particles[:80]
     gaps = []
     for i in range(len(sample)):
@@ -152,7 +153,7 @@ except Exception as exc:
 print(json.dumps(result, ensure_ascii=False, default=str))
 '''
 
-#: 结构检查：不运行仿真，只看文件与 API 形状。
+#: Structural check: does not run the simulation, only inspects files and API shape.
 _STRUCT = r'''
 import ast, json, os, sys
 
@@ -168,7 +169,7 @@ report = {"ok": True, "files": [], "problems": [], "notes": []}
 
 if not os.path.isdir(base):
     report["ok"] = False
-    report["problems"].append(f"目录不存在: {pkg}")
+    report["problems"].append(f"directory does not exist: {pkg}")
     print(json.dumps(report, ensure_ascii=False))
     raise SystemExit(3)
 
@@ -184,7 +185,7 @@ needed = ["main.py", "core.py", "config.py", "README.md"]
 for name in needed:
     path = os.path.join(base, name)
     if not os.path.exists(path):
-        report["problems"].append(f"缺少 {name}")
+        report["problems"].append(f"missing {name}")
 
 core_path = os.path.join(base, "core.py")
 if os.path.isfile(core_path):
@@ -192,11 +193,11 @@ if os.path.isfile(core_path):
     try:
         tree = ast.parse(source)
     except SyntaxError as exc:
-        report["problems"].append(f"core.py:{exc.lineno} 语法错误 {exc.msg}")
+        report["problems"].append(f"core.py:{exc.lineno} syntax error: {exc.msg}")
         tree = None
     if tree is not None:
-        # ponytail: 只看真实 import 语句。之前用子串匹配，把文档字符串里的
-        # "不 import pygame" 也判成了违规。
+        # Note: inspect real import statements only. An earlier substring match
+        # also flagged the docstring phrase "do not import pygame" as a violation.
         imported = set()
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
@@ -204,18 +205,18 @@ if os.path.isfile(core_path):
             elif isinstance(node, ast.ImportFrom) and node.module:
                 imported.add(node.module.split(".")[0])
         if "pygame" in imported:
-            report["problems"].append("core.py 不得 import pygame（物理层必须可无头驱动）")
+            report["problems"].append("core.py must not import pygame (the physics layer must run headless)")
 
         classes = {n.name: n for n in ast.walk(tree) if isinstance(n, ast.ClassDef)}
         if "ParticleSystem" not in classes:
-            report["problems"].append("core.py 缺少 class ParticleSystem")
+            report["problems"].append("core.py is missing class ParticleSystem")
         else:
             methods = {
                 n.name for n in classes["ParticleSystem"].body if isinstance(n, ast.FunctionDef)
             }
             for name in ("add_water", "add_solid", "step"):
                 if name not in methods:
-                    report["problems"].append(f"ParticleSystem 缺少方法 {name}")
+                    report["problems"].append(f"ParticleSystem is missing method {name}")
             properties = {
                 n.name
                 for n in classes["ParticleSystem"].body
@@ -225,14 +226,14 @@ if os.path.isfile(core_path):
             }
             for name in ("particles", "solids", "total_mass", "kinetic_energy"):
                 if name not in properties:
-                    report["notes"].append(f"建议提供只读属性 {name}")
+                    report["notes"].append(f"consider providing a read-only property {name}")
 
 readme = os.path.join(base, "README.md")
 if os.path.isfile(readme):
     text = open(readme, encoding="utf-8", errors="replace").read()
     for keyword in ("操作", "物理"):
         if keyword not in text:
-            report["notes"].append(f"README 建议补充「{keyword}」说明")
+            report["notes"].append(f"README should document '{keyword}'")
 
 for rel in py_files:
     path = os.path.join(base, rel)
@@ -240,20 +241,22 @@ for rel in py_files:
     try:
         ast.parse(source)
     except SyntaxError as exc:
-        report["problems"].append(f"{rel}:{exc.lineno} 语法错误 {exc.msg}")
+        report["problems"].append(f"{rel}:{exc.lineno} syntax error: {exc.msg}")
     if "TODO" in source or "FIXME" in source:
-        report["notes"].append(f"{rel}: 仍有 TODO/FIXME")
+        report["notes"].append(f"{rel}: still contains TODO/FIXME")
 
 print(json.dumps(report, ensure_ascii=False))
 '''
 
 
 def _target(workdir: str, path: str) -> tuple[str, str]:
-    """返回 ``(cwd, 传给探测脚本的路径参数)``。
+    """Return ``(cwd, path argument passed to the probe script)``.
 
-    ponytail: 一律从 ``workdir`` 运行并传相对路径。之前的实现会在非包布局时
-    切到子目录里再找 ``<子目录名>/``,必然找不到——探测脚本自己会拼
-    ``os.getcwd()/<path>``,从根目录跑才是唯一自洽的口径。
+    Note: always run from ``workdir`` and pass a relative path. The earlier
+    implementation switched into a subdirectory for non-package layouts and then
+    looked for ``<subdir>/``, which was guaranteed to fail -- the probe script
+    itself joins ``os.getcwd()/<path>``, so running from the root is the only
+    self-consistent choice.
     """
     return str(Path(workdir)), path
 
@@ -267,7 +270,7 @@ def _launch(
     timeout: int,
     with_exit: bool = False,
 ) -> str:
-    """在子进程执行探测脚本。"""
+    """Run the probe script in a child process."""
     import os
 
     cwd, name = _target(workdir, path)
@@ -284,17 +287,17 @@ def _launch(
             env=env,
         )
     except subprocess.TimeoutExpired as exc:
-        raise TimeoutError(f"探测超时（>{timeout}s）") from exc
+        raise TimeoutError(f"probe timed out (>{timeout}s)") from exc
     output = ((proc.stdout or "") + (proc.stderr or "")).strip()
-    return f"退出码 {proc.returncode}\n{output}" if with_exit else output
+    return f"exit code {proc.returncode}\n{output}" if with_exit else output
 
 
 def fluid_check(workdir: str, path: str = "fluid") -> str:
-    """结构验收：文件、API 形状、core.py 不依赖 pygame。"""
+    """Structural acceptance: files, API shape, and core.py not depending on pygame."""
     return _launch(_STRUCT, workdir, path, [], timeout=30, with_exit=True)
 
 
 def fluid_probe(workdir: str, path: str = "fluid", steps: int = 500) -> str:
-    """物理验收：跑 ``steps`` 步并检查守恒、边界、静置。"""
+    """Physical acceptance: run ``steps`` steps and check conservation, bounds and settling."""
     steps = max(1, min(int(steps), 3000))
     return _launch(_PROBE, workdir, path, [str(steps)], timeout=180, with_exit=True)
