@@ -1,15 +1,18 @@
-"""轨迹日志（ADT-7，E 组）。
+"""Trace logging (ADT-7, group E).
 
-对应文档：docs/02-数据结构设计/07-轨迹.md
+See docs/02-data-structures/07-traces.md.
 
-一个会话一个 JSONL 文件；每个事件一行、立即落盘。
+One JSONL file per session; one event per line, persisted immediately.
 
-* E1：每步结束即追加并 flush（可选 fsync），不缓存到最后统一写。
-* E2：每行必须是完整可解析的 JSON 对象（失败则整行不写）。
-* E3：每条事件必带 ``session_id``，且文件按会话隔离。
+* E1: append and flush at the end of every step (optional fsync); never buffer
+  until the end.
+* E2: every line must be a completely parseable JSON object (on failure the
+  whole line is not written).
+* E3: every event carries ``session_id``, and files are isolated per session.
 
-线程模型：``TraceLogger`` 内部持锁，多线程写同一文件时不会交错半行；
-不同会话写不同文件，互不阻塞。
+Threading model: ``TraceLogger`` holds an internal lock, so concurrent writers
+to the same file never interleave half-lines; different sessions write to
+different files and never block each other.
 """
 
 from __future__ import annotations
@@ -31,7 +34,7 @@ __all__ = [
     "trace_file_path",
 ]
 
-#: 轨迹子目录名：``<trace_root>/<session_id>.jsonl``
+#: Trace subdirectory name: ``<trace_root>/<session_id>.jsonl``
 TRACE_DIR_NAME = "traces"
 
 TraceKind = Literal[
@@ -46,22 +49,24 @@ TraceKind = Literal[
 
 
 def trace_file_path(trace_root: str | os.PathLike[str], session_id: str) -> Path:
-    """返回会话轨迹文件路径 ``<trace_root>/<session_id>.jsonl``。
+    """Return the session trace file path ``<trace_root>/<session_id>.jsonl``.
 
-    文件名对 ``session_id`` 做安全化（仅保留字母数字与 ``-_.``），
-    避免路径穿越（E3：按会话隔离，不允许跑到别的目录）。
+    The file name sanitizes ``session_id`` (keeping only alphanumerics and
+    ``-_.``) to prevent path traversal (E3: isolation per session, never
+    escaping into another directory).
     """
     safe = "".join(ch if (ch.isalnum() or ch in "-_.") else "_" for ch in session_id)
     if not safe:
-        raise ValueError("E3: session_id 不得为空")
+        raise ValueError("E3: session_id must not be empty")
     return Path(trace_root) / f"{safe}.jsonl"
 
 
 class TraceEvent(BaseModel):
-    """一条轨迹事件（ADT-7）。
+    """One trace event (ADT-7).
 
-    ``payload`` 结构见文档 §7.2；本模型不逐 kind 校验 payload 字段，
-    以便向前兼容（新增字段不破坏旧日志解析）。
+    The ``payload`` shape is described in design doc §7.2; this model does not
+    validate payload fields per kind, which keeps it forward compatible (new
+    fields never break parsing of old logs).
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -72,10 +77,10 @@ class TraceEvent(BaseModel):
     kind: TraceKind
     payload: dict[str, Any] = Field(default_factory=dict)
 
-    # --------------------------------------------------------------- 序列化
+    # -------------------------------------------------------- serialization
 
     def to_json_line(self) -> str:
-        """序列化为单行 JSON（不含换行符）；E2 保证可解析。"""
+        """Serialize to a single-line JSON string (no newline); E2 guarantees parseability."""
         return json.dumps(
             self.model_dump(mode="json"),
             ensure_ascii=False,
@@ -85,16 +90,18 @@ class TraceEvent(BaseModel):
 
     @classmethod
     def from_json_line(cls, line: str) -> TraceEvent:
-        """从一行 JSON 反序列化（用于日志回读与测试）。"""
+        """Deserialize from one JSON line (for log replay and tests)."""
         return cls.model_validate(json.loads(line))
 
 
 class TraceLogger:
-    """会话级轨迹写入器：一会话一份 JSONL（E1/E2/E3）。
+    """Session-level trace writer: one JSONL per session (E1/E2/E3).
 
-    每次 ``log`` 都追加一整行并 flush，因此**其它进程/测试立即读到**（E1）。
-    锁粒度为实例，多个实例指向同一文件时由操作系统追加语义 + 单次
-    ``write`` 调用保证整行不被撕裂；同一实例内多线程完全安全。
+    Every ``log`` appends a complete line and flushes, so **other processes and
+    tests see it immediately** (E1). The lock is per instance; multiple
+    instances pointing at the same file rely on OS append semantics plus a
+    single ``write`` call to keep lines intact, while multiple threads within
+    one instance are fully safe.
     """
 
     def __init__(
@@ -106,7 +113,7 @@ class TraceLogger:
         clock: Any = time.time,
     ) -> None:
         if not session_id:
-            raise ValueError("E3: session_id 不得为空")
+            raise ValueError("E3: session_id must not be empty")
         self._session_id = session_id
         self._path = trace_file_path(trace_root, session_id)
         self._path.parent.mkdir(parents=True, exist_ok=True)
@@ -114,27 +121,27 @@ class TraceLogger:
         self._clock = clock
         self._lock = threading.Lock()
 
-    # --------------------------------------------------------------- 属性
+    # ------------------------------------------------------------ properties
 
     @property
     def session_id(self) -> str:
-        """所属会话 id（E3）。"""
+        """Owning session id (E3)."""
         return self._session_id
 
     @property
     def path(self) -> Path:
-        """JSONL 文件路径。"""
+        """JSONL file path."""
         return self._path
 
-    # --------------------------------------------------------------- 写入
+    # --------------------------------------------------------------- writing
 
     def log(self, step: int, kind: TraceKind, payload: dict[str, Any] | None = None) -> TraceEvent:
-        """追加一条事件并立即落盘，返回写入的事件对象。
+        """Append one event and persist it immediately; returns the written event.
 
         Args:
-            step: ReAct 步号。
-            kind: 事件类型。
-            payload: 事件载荷，字段见文档 §7.2。
+            step: ReAct step number.
+            kind: Event kind.
+            payload: Event payload; fields in design doc §7.2.
         """
         event = TraceEvent(
             session_id=self._session_id,
@@ -144,7 +151,8 @@ class TraceLogger:
             payload=payload or {},
         )
         line = event.to_json_line() + "\n"
-        # 单次 write 写完整行；持锁保证同一实例内顺序与不交错
+        # A single write emits the whole line; the lock preserves ordering and
+        # prevents interleaving within this instance.
         with self._lock, self._path.open("a", encoding="utf-8", newline="\n") as handle:
             handle.write(line)
             handle.flush()
@@ -152,7 +160,7 @@ class TraceLogger:
                 os.fsync(handle.fileno())
         return event
 
-    # ------------------------------------------------------- 7 个便捷方法
+    # ------------------------------------------------- 7 convenience methods
 
     def log_llm_call(
         self,
@@ -164,7 +172,7 @@ class TraceLogger:
         duration_ms: float,
         tool_call_count: int,
     ) -> TraceEvent:
-        """记录一次 LLM 调用。"""
+        """Record one LLM call."""
         return self.log(
             step,
             "llm_call",
@@ -188,7 +196,7 @@ class TraceLogger:
         error_type: str | None,
         duration_ms: float,
     ) -> TraceEvent:
-        """记录一次工具执行。"""
+        """Record one tool execution."""
         return self.log(
             step,
             "tool_exec",
@@ -211,7 +219,7 @@ class TraceLogger:
         after_tokens: int,
         summary_chars: int,
     ) -> TraceEvent:
-        """记录一次压缩。"""
+        """Record one compression."""
         return self.log(
             step,
             "compress",
@@ -226,7 +234,7 @@ class TraceLogger:
     def log_inject(
         self, step: int, *, channel: Literal["chat", "control"], content_chars: int
     ) -> TraceEvent:
-        """记录一次外部注入。"""
+        """Record one external injection."""
         return self.log(step, "inject", {"channel": channel, "content_chars": content_chars})
 
     def log_error(
@@ -237,7 +245,7 @@ class TraceLogger:
         message: str,
         retry_count: int,
     ) -> TraceEvent:
-        """记录一次错误。"""
+        """Record one error."""
         return self.log(
             step,
             "error",
@@ -245,23 +253,23 @@ class TraceLogger:
         )
 
     def log_abort(self, step: int, *, reason: str, coalesced: bool) -> TraceEvent:
-        """记录一次中断。"""
+        """Record one abort."""
         return self.log(step, "abort", {"reason": reason, "coalesced": coalesced})
 
     def log_memory_extract(
         self, step: int, *, status: str, entries_added: int, duration_ms: float
     ) -> TraceEvent:
-        """记录一次结算提取结果。"""
+        """Record one settlement-extraction result."""
         return self.log(
             step,
             "memory_extract",
             {"status": status, "entries_added": entries_added, "duration_ms": duration_ms},
         )
 
-    # --------------------------------------------------------------- 回读
+    # --------------------------------------------------------------- replay
 
     def read_events(self) -> list[TraceEvent]:
-        """回读本会话已落盘的全部事件（每行必须可解析，E2）。"""
+        """Replay every persisted event of this session (each line must parse, E2)."""
         if not self._path.exists():
             return []
         with self._lock:

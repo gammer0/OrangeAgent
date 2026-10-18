@@ -1,16 +1,19 @@
-"""权限持久化：把 ``AgentPermissions.grants`` 落到 ``.agent/permissions.json``。
+"""Permission persistence: store ``AgentPermissions.grants`` in ``.agent/permissions.json``.
 
-对应文档：`docs/06-工具分组与外来能力.md` 第五节。
+See section 5 of the tool-groups-and-external-capabilities doc.
 
-设计要点：
+Design notes:
 
-* **只存例外**：``grants`` 的键是被拒绝的绝对路径，值是 ``false``。
-  未记录的路径默认允许（B15），因此文件通常很小。
-* **按 agent 分区**：服务组合根用 ``local``，Web 会话用 ``web``。同一份
-  策略通常两边都要，但允许分别配置（例如只在 Web 侧禁用 shell）。
-* **损坏降级**：文件损坏时**不**抛异常中断服务，而是返回空表并记录原因。
-  安全性上这等价于「全部允许」——但把不可读的配置当成「禁止一切」会让
-  服务直接不可用，权衡后选择降级 + 显式报错。
+* **Exceptions only**: keys in ``grants`` are denied absolute paths with value
+  ``false``. Unrecorded paths default to allowed (B15), so the file stays small.
+* **Partitioned by agent**: the service composition root uses ``local`` and web
+  sessions use ``web``. Both usually need the same policy, but they can be
+  configured separately (e.g. disable shell only on the web side).
+* **Degrade on corruption**: a corrupt file does **not** raise and take the
+  service down; we return an empty table and record the reason. Security-wise
+  this is equivalent to "allow everything" -- but treating an unreadable config
+  as "deny everything" would make the service unusable, so degrading plus an
+  explicit error report is the trade-off we chose.
 """
 
 from __future__ import annotations
@@ -31,31 +34,31 @@ __all__ = [
     "set_grant",
 ]
 
-#: 权限文件所在目录（与能力清单同处 ``.agent``）。
+#: Directory holding the permission file (the same ``.agent`` as the capability manifest).
 PERMISSION_DIR_NAME = ".agent"
 
-#: 权限文件名。
+#: Permission file name.
 PERMISSION_FILENAME = "permissions.json"
 
-#: 文件格式版本。
+#: File format version.
 PERMISSION_VERSION = 1
 
-#: 服务组合根使用的 agent 标识。
+#: Agent identifier used by the service composition root.
 LOCAL_AGENT = "local"
 
-#: Web 会话使用的 agent 标识。
+#: Agent identifier used by web sessions.
 WEB_AGENT = "web"
 
 
 def permissions_path(workdir: str | Path) -> Path:
-    """权限文件路径：``<workdir>/.agent/permissions.json``。"""
+    """Permission file path: ``<workdir>/.agent/permissions.json``."""
     return (
         Path(workdir).resolve() / PERMISSION_DIR_NAME / PERMISSION_FILENAME
     )
 
 
 def _read_raw(workdir: str | Path) -> dict[str, Any]:
-    """读取文件为 dict；文件不存在视为空配置。"""
+    """Read the file as a dict; a missing file counts as empty configuration."""
     target = permissions_path(workdir)
     if not target.is_file():
         return {"version": PERMISSION_VERSION, "agents": {}}
@@ -75,18 +78,19 @@ def load_permissions(
     *,
     problems: list[str] | None = None,
 ) -> AgentPermissions:
-    """读取某 agent 的权限表。
+    """Load one agent's permission table.
 
-    文件缺失或损坏时返回空表（= 全部允许），并把原因写入 ``problems``。
-    非法路径（非绝对路径）会被跳过，避免一条坏记录让整份策略失效。
+    A missing or corrupt file yields an empty table (= allow everything) and the
+    reason is appended to ``problems``. Invalid paths (non-absolute) are skipped
+    so that one bad record cannot invalidate the whole policy.
 
     Args:
-        workdir: 工作目录。
-        agent_id: ``local`` / ``web``，或用自定义标识。
-        problems: 可选列表，用于收集降级原因。
+        workdir: Working directory.
+        agent_id: ``local`` / ``web``, or a custom identifier.
+        problems: Optional list collecting degradation reasons.
 
     Returns:
-        该 agent 的权限表。
+        The permission table for that agent.
     """
     raw = _read_raw(workdir)
     agents = raw.get("agents") or {}
@@ -97,15 +101,16 @@ def load_permissions(
     for path, allowed in grants_raw.items():
         if not is_absolute_path(path):
             if problems is not None:
-                problems.append(f"permissions: 忽略非法路径 {path!r}")
+                problems.append(f"permissions: ignoring invalid path {path!r}")
             continue
         if allowed is not True:
-            # 只保留拒绝项；显式 true 与「无记录」等价，不占空间
+            # Keep denials only; an explicit true is equivalent to "no record"
+            # and would waste space.
             grants[path] = False
 
     try:
         return AgentPermissions(agent_id=agent_id, grants=grants)
-    except Exception as exc:  # noqa: BLE001 - 校验失败时降级
+    except Exception as exc:  # noqa: BLE001 - degrade when validation fails
         if problems is not None:
             problems.append(f"permissions: {exc}")
         return AgentPermissions(agent_id=agent_id)
@@ -114,7 +119,7 @@ def load_permissions(
 def save_permissions(
     permissions: AgentPermissions, workdir: str | Path
 ) -> Path:
-    """原子写入某 agent 的权限表（保留其他 agent 的配置）。"""
+    """Atomically write one agent's permission table (preserving other agents)."""
     raw = _read_raw(workdir)
     agents = raw.setdefault("agents", {})
     agents[permissions.agent_id] = {
@@ -140,16 +145,19 @@ def set_grant(
     allowed: bool,
     agent_id: str = LOCAL_AGENT,
 ) -> AgentPermissions:
-    """设置单条权限并落盘，返回新的权限表。
+    """Set a single permission and persist it, returning the new table.
 
-    ``allowed=False`` 表示拒绝该路径（及其子树，由 ``visible`` 保证）；
-    ``allowed=True`` 表示删除该例外，回到「默认允许」。
+    ``allowed=False`` denies that path (and its subtree, guaranteed by
+    ``visible``); ``allowed=True`` removes the exception and returns to
+    "allowed by default".
 
     Raises:
-        ValueError: 路径不是合法绝对路径（B16）。
+        ValueError: The path is not a valid absolute path (B16).
     """
     if not is_absolute_path(path):
-        raise ValueError(f"B16: 权限判定只接受完整绝对路径，实际为 {path!r}")
+        raise ValueError(
+            f"B16: permission checks accept full absolute paths only, got {path!r}"
+        )
 
     current = load_permissions(workdir, agent_id)
     updated = current.grant(path, True) if allowed else current.grant(path, False)
@@ -158,7 +166,7 @@ def set_grant(
 
 
 def list_grants(workdir: str | Path) -> dict[str, dict[str, bool]]:
-    """列出所有 agent 的拒绝记录，供 CLI 展示。"""
+    """List denial records for every agent, for CLI display."""
     raw = _read_raw(workdir)
     result: dict[str, dict[str, bool]] = {}
     for agent_id, entry in (raw.get("agents") or {}).items():
