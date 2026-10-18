@@ -1,29 +1,33 @@
-"""会话层（H 组）。
+"""Session layer (group H).
 
-对应文档：docs/02-数据结构设计/02-会话层.md
+See docs/02-data-structures/02-session-layer.md.
 
-结构层次::
+Structure::
 
     SessionRegistry
     ├── sessions: dict[str, Session]
     ├── lock: threading.Lock
     └── policy: EvictionPolicy
 
-跨分支耦合说明（重要）
---------------------
-会话层需要持有 ``Watermark`` / ``TreeQueryState`` / ``DiscoveredTools`` 三个
-**其他组**的会话级结构。为避免在本分支引入上下文层（F / B 组）模块的导入依赖，
-本模块只定义 ``Watermark`` 的**最小占位**与 ``TreeQueryState`` / ``DiscoveredTools``
-的**协议接口**（``Protocol``）：
+Cross-branch coupling (important)
+---------------------------------
+The session layer must hold three session-level structures that belong to
+**other groups**: ``Watermark`` / ``TreeQueryState`` / ``DiscoveredTools``. To
+avoid importing context-layer (groups F / B) modules into this branch, the module
+defines a **minimal placeholder** for ``Watermark`` and **protocol interfaces**
+(``Protocol``) for ``TreeQueryState`` / ``DiscoveredTools``:
 
-* ``Watermark`` 占位只包含文档 §8.1 的三个字段（``capacity`` / ``compressed_at`` /
-  ``last_estimate``）及序列化辅助，**不包含**水位判定逻辑（F1）。
-* ``TreeQueryState`` / ``DiscoveredTools`` 用 ``Protocol`` 描述字段形状，
-  运行时不需要导入上下文层/能力层实现，装配时可传入任一等价对象。
+* The ``Watermark`` placeholder only carries the three fields from doc §8.1
+  (``capacity`` / ``compressed_at`` / ``last_estimate``) plus serialization
+  helpers; it does **not** include watermark decision logic (F1).
+* ``TreeQueryState`` / ``DiscoveredTools`` describe field shapes via
+  ``Protocol``, so no context/capability implementation needs importing at
+  runtime -- any equivalent object can be passed during assembly.
 
-``SessionTreeQuery.clear_delivered`` / ``DiscoveredTools.clear`` 未在 B 组文档中
-写明方法名，这里通过 ``_reset_discovered`` 采用「先尝试 ``clear()``，否则回退构造
-新实例」的宽松策略，保证 H8 / H14 的语义可落地且不绑死 B 组 API。
+``SessionTreeQuery.clear_delivered`` / ``DiscoveredTools.clear`` are not
+specified by name in the group-B docs, so ``_reset_discovered`` uses a lenient
+strategy: "try ``clear()`` first, otherwise construct a new instance". This keeps
+the H8 / H14 semantics achievable without hard-coding the group-B API.
 """
 
 from __future__ import annotations
@@ -53,7 +57,7 @@ __all__ = [
     "new_session_id",
 ]
 
-#: 驱逐策略默认值（文档 §2.1）
+#: Eviction policy defaults (design doc §2.1)
 MAX_RESIDENT = 20
 IDLE_TIMEOUT_S = 1800
 SWEEP_INTERVAL_S = 60
@@ -62,21 +66,23 @@ SessionStatus = Literal["active", "idle", "ended"]
 
 
 def new_session_id() -> str:
-    """生成全局唯一 ``session_id``（路由键）。"""
+    """Generate a globally unique ``session_id`` (the routing key)."""
     return uuid.uuid4().hex
 
 
 # ----------------------------------------------------------------------
-# 跨分支依赖的最小占位
+# Minimal placeholders for cross-branch dependencies
 # ----------------------------------------------------------------------
 
 
 @dataclass
 class Watermark:
-    """上下文水位记录的**最小占位**（字段同文档 §8.1）。
+    """**Minimal placeholder** for the context watermark record (same fields as doc §8.1).
 
-    真实实现位于上下文层（F 组），本分支只保留数据结构以避免跨分支导入耦合。
-    水位判定（``JudgeResult``）与 ``compressed_at`` 的只增语义（F1）不在本类实现。
+    The real implementation lives in the context layer (group F); this branch
+    keeps only the data structure to avoid cross-branch import coupling. Watermark
+    decisions (``JudgeResult``) and the grow-only semantics of ``compressed_at``
+    (F1) are not implemented here.
     """
 
     capacity: int = 0
@@ -84,7 +90,7 @@ class Watermark:
     last_estimate: int = 0
 
     def to_json(self) -> dict[str, Any]:
-        """序列化为可写入 ``sessions.watermark`` 的 JSON 兼容字典。"""
+        """Serialize into a JSON-compatible dict writable to ``sessions.watermark``."""
         return {
             "capacity": self.capacity,
             "compressed_at": sorted(self.compressed_at),
@@ -93,7 +99,7 @@ class Watermark:
 
     @classmethod
     def from_json(cls, data: dict[str, Any] | None) -> Watermark | None:
-        """从 ``sessions.watermark`` 反序列化；``None`` 原样返回。"""
+        """Deserialize from ``sessions.watermark``; ``None`` is returned unchanged."""
         if data is None:
             return None
         raw_compressed = data.get("compressed_at") or []
@@ -106,9 +112,10 @@ class Watermark:
 
 @runtime_checkable
 class TreeQueryStateProtocol(Protocol):
-    """``TreeQueryState`` 的结构性接口（B 组）。
+    """Structural interface of ``TreeQueryState`` (group B).
 
-    恢复/卸载后必须置空 ``delivered``（H8 / H14），因此本层只依赖该字段可变。
+    ``delivered`` must be cleared after a restore or unload (H8 / H14), so this
+    layer only depends on that field being mutable.
     """
 
     delivered: set[str]
@@ -116,35 +123,38 @@ class TreeQueryStateProtocol(Protocol):
 
 @runtime_checkable
 class DiscoveredToolsProtocol(Protocol):
-    """``DiscoveredTools`` 的结构性接口（B 组）。
+    """Structural interface of ``DiscoveredTools`` (group B).
 
-    恢复/卸载后必须置空清单（H8 / H14）。实现类应提供 ``clear()``，否则由
-    ``reset_discovered`` 回退为构造新实例。
+    The inventory must be cleared after a restore or unload (H8 / H14).
+    Implementations should provide ``clear()``; otherwise ``reset_discovered``
+    falls back to constructing a new instance.
     """
 
     entries: dict[str, Any]
 
-    def clear(self) -> None:  # pragma: no cover - 结构性声明
+    def clear(self) -> None:  # pragma: no cover - structural declaration
         ...
 
 
 def reset_tree_query(tree_query: TreeQueryStateProtocol) -> None:
-    """置空 ``TreeQueryState.delivered``（H8 / H14）。"""
+    """Clear ``TreeQueryState.delivered`` (H8 / H14)."""
     tree_query.delivered.clear()
 
 
 def reset_discovered(discovered: DiscoveredToolsProtocol) -> Any:
-    """置空 ``DiscoveredTools``（H8 / H14）。
+    """Clear ``DiscoveredTools`` (H8 / H14).
 
-    优先调用 ``clear()``；实现类若未提供，则返回一个空清单的新实例供调用方替换。
-    返回值仅供“回退构造”路径使用，正常路径返回 ``None``。
+    Prefers ``clear()``; if the implementation lacks it, returns a new empty
+    instance for the caller to swap in. The return value is only used by the
+    "fallback construction" path; the normal path returns ``None``.
     """
     clear = getattr(discovered, "clear", None)
     if callable(clear):
         clear()
         return None
 
-    # 回退路径：构造一个同类型新实例，并尽力清空其 entries 容器。
+    # Fallback path: construct a same-type instance and best-effort clear its
+    # entries container.
     replacement = type(discovered)()
     entries = getattr(replacement, "entries", None)
     if isinstance(entries, dict):
@@ -153,18 +163,20 @@ def reset_discovered(discovered: DiscoveredToolsProtocol) -> Any:
 
 
 # ----------------------------------------------------------------------
-# 会话
+# Session
 # ----------------------------------------------------------------------
 
 
 @dataclass
 class Session:
-    """单个会话的运行时状态。
+    """Runtime state of a single session.
 
-    隔离边界（H1）：``messages`` / ``inbox`` / ``watermark`` / ``tree_query``
-    均须为会话独占对象，不得跨会话共享引用。
+    Isolation boundary (H1): ``messages`` / ``inbox`` / ``watermark`` /
+    ``tree_query`` must all be session-exclusive objects and must never be shared
+    by reference across sessions.
 
-    ``tree_version`` 在创建时固定（H15）：工具树后续挂载/卸载只影响新会话。
+    ``tree_version`` is fixed at creation (H15): later tool-tree mounts/unmounts
+    only affect new sessions.
     """
 
     session_id: str
@@ -179,23 +191,23 @@ class Session:
     status: SessionStatus = "idle"
 
     def touch(self) -> None:
-        """刷新 ``last_activity``，用于驱逐排序。"""
+        """Refresh ``last_activity``, used for eviction ordering."""
         self.last_activity = time.time()
 
     def busy(self) -> None:
-        """标记会话正在推理：``active`` 会话不会被 ``sweep`` 卸载（H10）。"""
+        """Mark the session as reasoning: ``active`` sessions are never unloaded by ``sweep`` (H10)."""
         self.status = "active"
         self.touch()
 
     def release(self) -> None:
-        """推理结束，会话回到 ``idle``，重新可被驱逐。"""
+        """Reasoning finished; the session returns to ``idle`` and becomes evictable again."""
         if self.status != "ended":
             self.status = "idle"
         self.touch()
 
 
 def _default_tree_query() -> TreeQueryStateProtocol:
-    """构造默认的空 ``TreeQueryState`` 占位对象（避免导入 B 组实现）。"""
+    """Build an empty default ``TreeQueryState`` placeholder (avoids importing group B)."""
 
     class _DefaultTreeQuery:
         def __init__(self) -> None:
@@ -206,7 +218,7 @@ def _default_tree_query() -> TreeQueryStateProtocol:
 
 @dataclass
 class EvictionPolicy:
-    """会话驱逐策略（文档 §2.1 / §2.4）。"""
+    """Session eviction policy (design doc §2.1 / §2.4)."""
 
     max_resident: int = MAX_RESIDENT
     idle_timeout_s: int = IDLE_TIMEOUT_S
@@ -215,7 +227,7 @@ class EvictionPolicy:
 
 @dataclass
 class SessionRecord:
-    """``sessions`` 表的持久化行（SQLite 投影）。"""
+    """A persisted row of the ``sessions`` table (SQLite projection)."""
 
     session_id: str
     working_dir: str
@@ -226,54 +238,55 @@ class SessionRecord:
 
 
 # ----------------------------------------------------------------------
-# 注册表
+# Registry
 # ----------------------------------------------------------------------
 
 
 class SessionRegistry:
-    """多会话注册表。
+    """Multi-session registry.
 
-    线程模型（H2）：所有读写持 ``self._lock``；临界区**只做字典操作**，
-    不得包含 LLM 调用或工具执行。
+    Threading model (H2): every read and write holds ``self._lock``; critical
+    sections perform **dict operations only** and must never contain LLM calls or
+    tool execution.
     """
 
     def __init__(self, policy: EvictionPolicy | None = None) -> None:
         self.sessions: dict[str, Session] = {}
         self.lock = threading.Lock()
         self.policy = policy or EvictionPolicy()
-        # 后台清扫线程（S2）：懒启动，默认不运行
+        # Background sweeper thread (S2): lazily started, off by default
         self._sweeper: threading.Thread | None = None
         self._sweeper_stop = threading.Event()
         self._sweeper_lock = threading.Lock()
 
     # ------------------------------------------------------------------
-    # 基本读写
+    # Basic reads and writes
     # ------------------------------------------------------------------
 
     def add(self, session: Session) -> Session:
-        """登记会话（持锁）。同 id 已存在时覆盖。"""
+        """Register a session (locked). An existing id is overwritten."""
         with self.lock:
             self.sessions[session.session_id] = session
         return session
 
     def get(self, session_id: str) -> Session | None:
-        """按 id 取会话（持锁）；不存在返回 ``None``。"""
+        """Look up a session by id (locked); returns ``None`` when absent."""
         with self.lock:
             return self.sessions.get(session_id)
 
     def remove(self, session_id: str) -> Session | None:
-        """从内存移除会话（持锁），返回被移除对象；不存在返回 ``None``。
+        """Remove a session from memory (locked) and return it; ``None`` when absent.
 
-        仅丢弃内存引用，不触碰数据库（H13）。
+        Drops the in-memory reference only; the database is untouched (H13).
         """
         with self.lock:
             return self.sessions.pop(session_id, None)
 
     def end(self, session_id: str) -> Session | None:
-        """标记会话 ``ended`` 并立即从内存移除（H12）。
+        """Mark ``ended`` and remove from memory immediately (H12).
 
         Returns:
-            被移除的会话对象；不存在返回 ``None``。
+            The removed session object; ``None`` when absent.
         """
         with self.lock:
             session = self.sessions.get(session_id)
@@ -291,33 +304,39 @@ class SessionRegistry:
             return session_id in self.sessions
 
     # ------------------------------------------------------------------
-    # 驱逐
+    # Eviction
     # ------------------------------------------------------------------
 
     def _evictable(self, session: Session, now: float) -> bool:
-        """会话是否可被卸载：不活跃（``idle``）且无待处理消息（H10）。"""
+        """Whether the session can be unloaded: inactive (``idle``) and no pending messages (H10)."""
         return session.status == "idle" and session.inbox.is_empty()
 
     def sweep(self, now: float | None = None) -> list[str]:
-        """执行一次驱逐扫描（文档 §2.4）。
+        """Run one eviction scan (design doc §2.4).
 
-        三段规则，均在**同一把锁**内完成（H11“卸载须持锁”）：
+        Three-stage rule set, all inside **one lock** (H11: "unloading must hold
+        the lock"):
 
-        1. 持锁移除全部 ``ended`` 会话（H12）；
-        2. **空闲超时**：``now - last_activity > idle_timeout_s`` 且可卸载者，
-           一律卸载。这是唯一不依赖会话数量的回收路径；
-        3. **容量溢出**：若驻留数仍超过 ``max_resident``，按 ``last_activity``
-           升序继续卸载可卸载会话，直到满足上限或无可卸载对象。
+        1. Remove every ``ended`` session under the lock (H12);
+        2. **Idle timeout**: unload any evictable session with
+           ``now - last_activity > idle_timeout_s``. This is the only reclaim path
+           that does not depend on session count;
+        3. **Capacity overflow**: if the resident count still exceeds
+           ``max_resident``, keep unloading evictable sessions in ascending
+           ``last_activity`` order until the limit is met or nothing is evictable.
 
-        可卸载（H10）= ``status == "idle"`` 且 ``inbox`` 为空。
-        ``active`` 会话（正在推理）永不卸载，因此驻留数可能短暂超过
-        ``max_resident`` —— 上限是目标而非硬约束。
+        Evictable (H10) = ``status == "idle"`` and empty ``inbox``. ``active``
+        sessions (currently reasoning) are never unloaded, so the resident count
+        may briefly exceed ``max_resident`` -- the limit is a target, not a hard
+        constraint.
 
         Args:
-            now: 逻辑当前时间（秒）。默认取 ``time.time()``；测试可注入。
+            now: Logical current time (seconds). Defaults to ``time.time()``;
+                tests may inject it.
 
         Returns:
-            被卸载（含 ``ended`` 移除）的 ``session_id`` 列表。
+            The list of unloaded (including ``ended`` removals) ``session_id``
+            values.
         """
         current = time.time() if now is None else now
         evicted: list[str] = []
@@ -327,7 +346,7 @@ class SessionRegistry:
                 self.sessions.pop(session_id, None)
                 evicted.append(session_id)
 
-            # ① 空闲超时淘汰（与容量无关）
+            # 1) Idle-timeout eviction (independent of capacity)
             timed_out = [
                 s
                 for s in self.sessions.values()
@@ -338,7 +357,7 @@ class SessionRegistry:
                 self.sessions.pop(session.session_id, None)
                 evicted.append(session.session_id)
 
-            # ② 容量溢出淘汰（LRU）
+            # 2) Capacity-overflow eviction (LRU)
             overflow = len(self.sessions) - self.policy.max_resident
             if overflow > 0:
                 candidates = sorted(
@@ -352,20 +371,21 @@ class SessionRegistry:
         return evicted
 
     def session_ids(self) -> list[str]:
-        """当前内存驻留的全部会话 id（快照，持锁）。"""
+        """All session ids currently resident in memory (snapshot, locked)."""
         with self.lock:
             return list(self.sessions.keys())
 
     # ------------------------------------------------------------------
-    # 周期清扫（S2）
+    # Periodic sweeping (S2)
     # ------------------------------------------------------------------
 
     def start_sweeper(self) -> None:
-        """启动后台清扫线程，按 ``policy.sweep_interval_s`` 周期调用 ``sweep()``。
+        """Start the background sweeper thread, calling ``sweep()`` every ``policy.sweep_interval_s``.
 
-        幂等：已在运行时直接返回。线程为守护线程，不阻止进程退出；
-        ``stop_sweeper()`` 会尽快唤醒并结束它（``Event.wait`` 可被立即打断，
-        因此不会为等待一个完整周期而阻塞关闭）。
+        Idempotent: returns immediately when already running. The thread is a
+        daemon so it never blocks process exit; ``stop_sweeper()`` wakes and ends
+        it promptly (``Event.wait`` is interruptible, so shutdown never waits out
+        a full interval).
         """
         with self._sweeper_lock:
             if self._sweeper is not None and self._sweeper.is_alive():
@@ -381,7 +401,7 @@ class SessionRegistry:
             thread.start()
 
     def stop_sweeper(self, timeout: float = 2.0) -> None:
-        """通知后台清扫线程退出并等待其结束（幂等）。"""
+        """Signal the background sweeper to exit and wait for it (idempotent)."""
         with self._sweeper_lock:
             thread = self._sweeper
             self._sweeper = None
@@ -392,15 +412,17 @@ class SessionRegistry:
 
     @property
     def sweeping(self) -> bool:
-        """后台清扫线程是否正在运行。"""
+        """Whether the background sweeper thread is running."""
         with self._sweeper_lock:
             return self._sweeper is not None and self._sweeper.is_alive()
 
     def _sweeper_loop(self) -> None:
-        """清扫线程主体：等待间隔 → 扫描，直到被要求停止。"""
+        """Sweeper body: wait for the interval, then scan, until asked to stop."""
         interval = max(1, int(self.policy.sweep_interval_s))
-        # 首轮延后一个完整周期，避免服务刚启动就因空表扫描产生噪音
+        # Delay the first round by a full interval so a freshly started service
+        # does not produce noise by scanning an empty table.
         while not self._sweeper_stop.wait(interval):
-            # 清扫是尽力而为，任何异常都不应拖垮服务或结束线程
+            # Sweeping is best-effort: no exception may take down the service or
+            # end the thread.
             with contextlib.suppress(Exception):
                 self.sweep()
