@@ -56,7 +56,11 @@ ENV_MAX_RETRIES = "LLM_MAX_RETRIES"
 DEFAULT_BASE_URL = "https://api.deepseek.com"
 DEFAULT_MODEL = "deepseek-chat"
 DEFAULT_TEMPERATURE = 0.7
-DEFAULT_MAX_TOKENS = 4096
+#: 单次输出上限。
+#: ponytail: 4096 不够用——实测 agent 写一个 100 行的文件时，参数长度
+#: 正好撞上 4096 被截断（`_rjust(` 处断掉），导致写入不完整。
+#: DeepSeek 系列支持 8192，宁大勿小；成本只与实际生成量相关。
+DEFAULT_MAX_TOKENS = 8192
 DEFAULT_TIMEOUT = 60.0
 DEFAULT_MAX_RETRIES = 2
 
