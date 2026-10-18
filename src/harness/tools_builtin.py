@@ -61,7 +61,12 @@ def _clip(text: str) -> str:
 
 
 def _run(cmd: list[str], cwd: str, timeout: int = DEFAULT_TIMEOUT_S) -> tuple[int, str]:
-    """在子进程运行命令，返回 ``(退出码, 合并输出)``。"""
+    """在子进程运行命令，返回 ``(退出码, 合并输出)``。
+
+    强制 UTF-8 与 ``PYTHONIOENCODING``：Windows 子进程默认 GBK，
+    会把项目里的中文输出变成乱码，使 agent 误判失败。
+    """
+    env = {**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"}
     try:
         proc = subprocess.run(
             cmd,
@@ -71,6 +76,7 @@ def _run(cmd: list[str], cwd: str, timeout: int = DEFAULT_TIMEOUT_S) -> tuple[in
             encoding="utf-8",
             errors="replace",
             timeout=timeout,
+            env=env,
         )
     except subprocess.TimeoutExpired as exc:
         raise TimeoutError(f"命令超时（>{timeout}s）: {' '.join(cmd)}") from exc
@@ -232,28 +238,40 @@ def snake_check(workdir: str, path: str = "snake_game") -> str:
 
 
 #: 无头自检驱动：探针脚本，不依赖被测项目的具体 API，只看"能否稳定推进状态"。
+#: 以 ``<包名>.<模块>`` 形式导入，兼容项目内部的相对导入。
 _DEMO_DRIVER = r'''
-import json, os, sys
+import importlib, json, os, sys
 sys.path.insert(0, os.getcwd())
+
+try:
+    sys.stdout.reconfigure(encoding="utf-8")
+except Exception:
+    pass
 
 steps = int(sys.argv[1])
 seed = int(sys.argv[2])
+package = sys.argv[3] if len(sys.argv) > 3 else ""
 
 import random
 random.seed(seed)
 
-CANDIDATES = [
-    ("snake.engine", "SnakeGame"),
-    ("game", "SnakeGame"),
-    ("game", "Game"),
-    ("snake", "Game"),
-    ("engine", "Game"),
-]
+BASES = [f"{package}.game", f"{package}.snake", f"{package}.engine",
+         "game", "snake", "engine"] if package else ["game", "snake", "engine"]
+
+CANDIDATES = []
+for base in BASES:
+    for name in ("SnakeGame", "Game"):
+        CANDIDATES.append((base, name))
+
+# 如果包里提供了 game 模块，它的父包也应被尝试（snake_game.game）
+if package and f"{package}.game" not in BASES:
+    CANDIDATES.append((f"{package}.game", "SnakeGame"))
 
 game = None
+used = None
 for module_name, cls_name in CANDIDATES:
     try:
-        module = __import__(module_name, fromlist=[cls_name])
+        module = importlib.import_module(module_name)
     except Exception:
         continue
     cls = getattr(module, cls_name, None)
@@ -262,6 +280,7 @@ for module_name, cls_name in CANDIDATES:
     for kwargs in ({}, {"width": 20, "height": 20}, {"cols": 20, "rows": 20}):
         try:
             game = cls(**kwargs)
+            used = f"{module_name}.{cls_name}"
             break
         except TypeError:
             continue
@@ -269,19 +288,22 @@ for module_name, cls_name in CANDIDATES:
         break
 
 if game is None:
-    print(json.dumps({"ok": False, "reason": "未找到可实例化的游戏类（尝试 SnakeGame/Game）"}, ensure_ascii=False))
+    print(json.dumps({"ok": False, "reason": "未找到可实例化的游戏类",
+                      "tried": [f"{m}.{c}" for m, c in CANDIDATES]}, ensure_ascii=False))
     raise SystemExit(3)
 
 MOVES = ["up", "down", "left", "right"]
 methods = [name for name in ("step", "tick", "update") if hasattr(game, name)]
 if not methods:
-    print(json.dumps({"ok": False, "reason": "游戏类缺少 step/tick/update 推进方法"}, ensure_ascii=False))
+    print(json.dumps({"ok": False, "reason": "游戏类缺少 step/tick/update 推进方法",
+                      "class": used}, ensure_ascii=False))
     raise SystemExit(4)
 
 move_fn = getattr(game, "move", None) or getattr(game, "set_direction", None) or getattr(game, "change_direction", None)
 frames = 0
 errors = []
 for index in range(steps):
+    over = bool(getattr(game, "over", False))
     if move_fn is not None:
         try:
             move_fn(random.choice(MOVES))
@@ -293,16 +315,18 @@ for index in range(steps):
         errors.append(f"step {index}: {type(exc).__name__}: {exc}")
         break
     frames += 1
+    if over and hasattr(game, "reset"):
+        game.reset()
 
-score = getattr(game, "score", None)
 snake = getattr(game, "snake", None)
 length = len(snake) if hasattr(snake, "__len__") else None
 print(json.dumps({
     "ok": not errors,
+    "class": used,
     "frames": frames,
     "moves": methods[0],
     "direction_api": getattr(move_fn, "__name__", None),
-    "score": score,
+    "score": getattr(game, "score", None),
     "length": length,
     "errors": errors,
 }, ensure_ascii=False, default=str))
@@ -311,13 +335,20 @@ raise SystemExit(0 if not errors else 5)
 
 
 def snake_demo(workdir: str, path: str = "snake_game", steps: int = 200, seed: int = 7) -> str:
-    """无头自检：以固定随机种子推进若干帧，验证核心逻辑不崩溃。"""
+    """无头自检：以固定随机种子推进若干帧，验证核心逻辑不崩溃。
+
+    探针会在 ``<path>/game.py``、``<包名>.game`` 等位置寻找 ``SnakeGame`` / ``Game``，
+    因此项目既可以扁平布局也可以包布局。
+    """
     base = _resolve(workdir, path)
     if not base.is_dir():
         raise NotADirectoryError(f"目录不存在: {path}")
+    # 包布局（含或不含 __init__.py 的命名空间包）从父目录导入 ``<包名>.game``；
+    # 扁平布局则从目录内部导入 ``game``。
+    package = base.name if base.name.isidentifier() else ""
     code, output = _run(
-        [sys.executable, "-B", "-c", _DEMO_DRIVER, str(steps), str(seed)],
-        str(base),
+        [sys.executable, "-B", "-c", _DEMO_DRIVER, str(steps), str(seed), package],
+        str(base.parent if package else base),
         DEFAULT_TIMEOUT_S,
     )
     return f"退出码 {code}\n{output}"

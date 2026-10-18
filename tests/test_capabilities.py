@@ -88,6 +88,78 @@ def test_snake_check_flags_missing_entry(tmp_path):
     assert any("main.py" in item for item in report["问题"])
 
 
+_MINIMAL_GAME = """\
+from __future__ import annotations
+
+
+class SnakeGame:
+    def __init__(self, width: int = 20, height: int = 20, seed: int | None = None) -> None:
+        self.width = width
+        self.height = height
+        self._snake = [(5, 5)]
+        self._direction = "right"
+        self._score = 0
+        self._over = False
+
+    def move(self, direction: str) -> None:
+        if direction == "left":
+            return
+        self._direction = direction
+
+    def step(self) -> None:
+        dx, dy = {"up": (0, -1), "down": (0, 1), "right": (1, 0)}[self._direction]
+        head = self._snake[0]
+        head = (head[0] + dx, head[1] + dy)
+        if not (0 <= head[0] < self.width and 0 <= head[1] < self.height):
+            self._over = True
+            return
+        self._snake = [head]
+
+    def reset(self) -> None:
+        self._snake = [(5, 5)]
+        self._over = False
+
+    @property
+    def score(self) -> int:
+        return self._score
+
+    @property
+    def snake(self) -> list[tuple[int, int]]:
+        return list(self._snake)
+
+    @property
+    def food(self) -> tuple[int, int]:
+        return (10, 10)
+
+    @property
+    def over(self) -> bool:
+        return self._over
+"""
+
+
+def test_snake_demo_handles_package_layout(tmp_path):
+    """包布局（无 __init__.py、使用相对导入）也能被探针导入。"""
+    project = tmp_path / "snake_game"
+    project.mkdir()
+    (project / "game.py").write_text(_MINIMAL_GAME, encoding="utf-8")
+    output = build_tool("/tool/game/snake/demo", str(tmp_path)).fn(
+        path="snake_game", steps=50, seed=1
+    )
+    assert "退出码 0" in output
+    assert '"ok": true' in output
+    assert "snake_game.game.SnakeGame" in output
+
+
+def test_snake_demo_reports_missing_class(tmp_path):
+    """找不到游戏类时给出可读原因与尝试列表。"""
+    project = tmp_path / "empty_game"
+    project.mkdir()
+    (project / "nothing.py").write_text("x = 1\n", encoding="utf-8")
+    output = build_tool("/tool/game/snake/demo", str(tmp_path)).fn(path="empty_game")
+    assert "退出码 3" in output
+    assert "未找到可实例化的游戏类" in output
+
+
 # ---------------------------------------------------------------------------
 # 清单往返
 # ---------------------------------------------------------------------------
