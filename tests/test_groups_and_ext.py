@@ -12,21 +12,20 @@ from harness.capabilities import (
     CapabilityError,
     CapabilityManifest,
     GroupDef,
-    SkillDef,
     SourceSpec,
     group_of,
     load_manifest,
     normalize_group,
     save_manifest,
 )
+from harness.mcp_client import McpServerConfig
 from harness.permission import PermissionDenied, visible
 from harness.permission_store import (
     load_permissions,
     permissions_path,
-    save_permissions,
     set_grant,
 )
-from harness.tool_tree import FlatStore, build_tree
+from harness.tool_tree import FlatStore, ToolTree, build_tree
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -177,9 +176,7 @@ class TestExternalTools:
 
 
 class TestMcp:
-    def _config(self):
-        from harness.mcp_client import McpServerConfig
-
+    def _config(self) -> McpServerConfig:
         server = FIXTURES / "mcp_echo_server.py"
         return McpServerConfig(
             name="echo", command=sys.executable, args=(str(server),)
@@ -271,7 +268,7 @@ class TestPermissionStore:
 class TestPermissionBlocksTree:
     """权限必须真实屏蔽：查询不可见 + 调用被拒。"""
 
-    def _tree(self, tmp_path: Path, grants: dict[str, bool]):
+    def _tree(self, tmp_path: Path, grants: dict[str, bool]) -> ToolTree:
         from harness.permission import AgentPermissions
 
         manifest = CapabilityManifest()
@@ -297,3 +294,78 @@ class TestPermissionBlocksTree:
         assert "/tool/ext/hello" not in index
         with pytest.raises(PermissionDenied):
             tree.resolve("/tool/ext/hello")
+
+
+class TestGroupLevelDenial:
+    """分组级禁用：拒一个分组 = 禁用其下所有工具。
+
+    这是权限系统最常用的操作——用户想关掉「网络」或「执行」整类能力，
+    而不是逐个工具去 deny。
+    """
+
+    def _tree_with(self, tmp_path: Path, grants: dict[str, bool]) -> ToolTree:
+        """构造含多层级分组的树。"""
+        from harness.permission import AgentPermissions
+        from harness.tools_builtin import build_tool
+        manifest = CapabilityManifest()
+        for path in (
+            "/tool/os/file/read",
+            "/tool/os/file/write",
+            "/tool/net/http/get",
+            "/tool/net/http/post",
+        ):
+            manifest.add_tool(build_tool(path, str(tmp_path)))
+        store = FlatStore(manifest.to_tooldefs(str(tmp_path)))
+        return build_tree(store, AgentPermissions(agent_id="t", grants=grants))
+
+    def test_denying_group_hides_all_children(self, tmp_path: Path) -> None:
+        tree = self._tree_with(tmp_path, {"/tool/net": False})
+        paths = set(tree.paths)
+        assert "/tool/net" not in paths
+        assert not any(p.startswith("/tool/net/") for p in paths)
+
+    def test_denying_group_leaves_siblings(self, tmp_path: Path) -> None:
+        tree = self._tree_with(tmp_path, {"/tool/net": False})
+        paths = set(tree.paths)
+        assert "/tool/os/file/read" in paths
+        assert "/tool/os/file/write" in paths
+
+    def test_denying_group_blocks_calls(self, tmp_path: Path) -> None:
+        tree = self._tree_with(tmp_path, {"/tool/net": False})
+        for path in ("/tool/net/http/get", "/tool/net/http/post"):
+            with pytest.raises(PermissionDenied):
+                tree.resolve(path)
+
+    def test_denying_l1_root_blanks_whole_branch(self, tmp_path: Path) -> None:
+        tree = self._tree_with(tmp_path, {"/tool": False})
+        assert not [p for p in tree.paths if p.startswith("/tool")]
+        assert "/tool" not in tree.tree_index()
+
+    def test_denying_deep_group_keeps_ancestors(self, tmp_path: Path) -> None:
+        """拒 L3 分组时，L1/L2 祖先仍在（它们本身未被拒）。"""
+        tree = self._tree_with(tmp_path, {"/tool/os/file": False})
+        paths = set(tree.paths)
+        assert "/tool" in paths
+        assert "/tool/os" in paths
+        assert "/tool/os/file" not in paths
+        assert "/tool/os/file/read" not in paths
+
+    def test_ancestor_denial_beats_child_grant(self, tmp_path: Path) -> None:
+        """祖先被拒时，子路径显式允许也不能绕过（拒绝优先，更安全）。"""
+        tree = self._tree_with(
+            tmp_path, {"/tool/net": False, "/tool/net/http/get": True}
+        )
+        assert "/tool/net/http/get" not in tree.paths
+        with pytest.raises(PermissionDenied):
+            tree.resolve("/tool/net/http/get")
+
+    def test_group_denial_survives_persistence(self, tmp_path: Path) -> None:
+        """分组拒绝必须能落盘并重新读回。"""
+        from harness.permission_store import load_permissions, set_grant
+
+        (tmp_path / ".agent").mkdir(parents=True, exist_ok=True)
+        set_grant(tmp_path, "/tool/net", allowed=False, agent_id="local")
+
+        perms = load_permissions(tmp_path, "local")
+        assert perms.grants.get("/tool/net") is False
+        assert visible("/tool/net/http/get", perms) is False
