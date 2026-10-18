@@ -89,8 +89,12 @@ def _run(cmd: list[str], cwd: str, timeout: int = DEFAULT_TIMEOUT_S) -> tuple[in
 # ---------------------------------------------------------------------------
 
 
-def file_read(workdir: str, path: str, offset: int = 0, limit: int = 400) -> str:
-    """读取文本文件；``offset`` / ``limit`` 以行为单位。"""
+def file_read(workdir: str, path: str, offset: int = 0, limit: int = 120) -> str:
+    """读取文本文件；``offset`` / ``limit`` 以行为单位。
+
+    ponytail: 默认 120 行（原 400）——实测一次读整文件会吐出 8k 字符，
+    直接吃掉上下文。超长文件请用 offset 续读。
+    """
     target = _resolve(workdir, path)
     if not target.is_file():
         raise FileNotFoundError(f"文件不存在: {path}")
@@ -418,7 +422,7 @@ TOOL_SPECS: dict[str, dict[str, Any]] = {
     for s in [
         _spec("/tool/os/file/read", file_read, "按行读取工作目录内文本文件",
               {"path": _STR, "offset": {"type": "integer", "default": 0},
-               "limit": {"type": "integer", "default": 400}}, ["path"], ["read"], True),
+               "limit": {"type": "integer", "default": 120}}, ["path"], ["read"], True),
         _spec("/tool/os/file/list", file_list, "列出目录条目（文件/目录+大小）",
               {"path": {"type": "string", "default": "."}, "pattern": {"type": "string", "default": "*"}},
               [], ["read"], True),

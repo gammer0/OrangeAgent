@@ -188,6 +188,15 @@ class ContextAssembler:
         """已缓存的 ``SystemMsg``；尚未装配时为 ``None``。"""
         return self._system
 
+    @property
+    def compress_available(self) -> bool:
+        """C3 压缩当前是否真的可用。
+
+        ponytail: 没有摘要器时压缩会被静默跳过（I4 保守退化），
+        运维面需要这个信号才能发现"压缩从未发生"。
+        """
+        return self.enable_auto_compress and self.summarizer is not None
+
     def reset_system(self) -> None:
         """丢弃缓存的 ``SystemMsg``。
 

@@ -181,6 +181,7 @@ def create_app(workdir: str | Path | None = None) -> FastAPI:
             "tools": len(manager.tools.store.active_paths()) if manager else 0,
             "skills": len(manager.capabilities.skills) if manager and manager.capabilities else 0,
             "capability_error": manager.capability_error if manager else None,
+            "compress_available": manager.compress_available if manager else False,
             "capability_file": str(
                 state.workdir / ".agent" / "capabilities.json"
             ),
