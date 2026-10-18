@@ -1,18 +1,24 @@
-"""服务管理：把分散的运行时组件组装为一个可查询、可启停的服务实例。
+"""Service management: assemble scattered runtime components into one queryable,
+startable/stoppable service instance.
 
-对应职责（不是新的业务概念，而是**组合根**）：
+Responsibilities (this is a **composition root**, not a new business concept):
 
-* 统一持有 ``FlatStore`` / ``ToolTree`` / ``SessionRegistry`` / ``SessionStore`` /
-  ``ReverseProxy`` / ``ContextAssembler`` 等组件的生命周期；
-* 提供只读状态快照（`ServiceStatus`），供 CLI 与健康检查使用；
-* 提供受限的运维动作（驱逐空闲会话、关闭持久化连接）。
+* Own the lifecycle of ``FlatStore`` / ``ToolTree`` / ``SessionRegistry`` /
+  ``SessionStore`` / ``ReverseProxy`` / ``ContextAssembler`` and friends;
+* Provide a read-only status snapshot (``ServiceStatus``) for the CLI and health
+  checks;
+* Provide constrained operational actions (evict idle sessions, close the
+  persistence connection).
 
-设计约束：
+Design constraints:
 
-* **不引入新不变量**：所有约束仍由各模块守护，本模块只做组装与观测。
-* **状态快照必须无副作用**：``status()`` 不触发 LLM 调用、不写库、不清缓存。
-* **失败即数据**：组件初始化失败不抛到调用方，而是记录在快照的 ``problems`` 中，
-  让 CLI 能报告"哪一层没起来"而不是整个进程崩掉。
+* **Introduce no new invariants**: every constraint is still guarded by its own
+  module; this module only assembles and observes.
+* **The status snapshot must be side-effect free**: ``status()`` triggers no LLM
+  call, writes no database row and clears no cache.
+* **Failure is data**: component initialization failures are not raised to the
+  caller but recorded in the snapshot's ``problems``, so the CLI can report
+  "which layer did not come up" instead of crashing the whole process.
 """
 
 from __future__ import annotations
@@ -57,13 +63,14 @@ ServiceState = str  # "not_loaded" | "ready" | "degraded" | "failed"
 
 @dataclass(frozen=True, slots=True)
 class LayerStatus:
-    """单个组件的状态。
+    """Status of a single component.
 
     Attributes:
-        name: 组件名（与模块对应）。
-        state: ``ready`` / ``degraded`` / ``failed``。
-        detail: 人可读说明；失败时为错误原因（不含密钥）。
-        metrics: 该组件的关键计数。
+        name: Component name (maps to a module).
+        state: ``ready`` / ``degraded`` / ``failed``.
+        detail: Human-readable description; the error reason on failure (never
+            containing secrets).
+        metrics: Key counters for this component.
     """
 
     name: str
@@ -74,14 +81,14 @@ class LayerStatus:
 
 @dataclass(frozen=True, slots=True)
 class ServiceStatus:
-    """服务整体快照（只读、无副作用）。
+    """Whole-service snapshot (read-only, side-effect free).
 
     Attributes:
-        workdir: 工作目录。
-        state: 整体状态，取各层最差结果。
-        layers: 各组件状态列表。
-        problems: 初始化阶段收集的问题。
-        captured_at: 快照时间戳。
+        workdir: Working directory.
+        state: Overall state, the worst result across layers.
+        layers: Per-component status list.
+        problems: Problems collected during initialization.
+        captured_at: Snapshot timestamp.
     """
 
     workdir: str
@@ -92,18 +99,18 @@ class ServiceStatus:
 
     @property
     def ok(self) -> bool:
-        """是否全部组件就绪。"""
+        """Whether every component is ready."""
         return self.state == "ready"
 
     def layer(self, name: str) -> LayerStatus | None:
-        """按名称取某层状态。"""
+        """Look up one layer's status by name."""
         for item in self.layers:
             if item.name == name:
                 return item
         return None
 
     def to_dict(self) -> dict[str, Any]:
-        """导出为可 JSON 序列化的字典（CLI ``--json`` 使用）。"""
+        """Export as a JSON-serializable dict (for CLI ``--json``)."""
         return {
             "workdir": self.workdir,
             "state": self.state,
@@ -123,19 +130,20 @@ class ServiceStatus:
 
 
 class HarnessService:
-    """服务组合根。
+    """Service composition root.
 
-    构造时**不抛异常**：各组件的初始化失败会记录在 ``self.problems``，
-    对应层状态置为 ``failed`` 或 ``degraded``，便于 CLI 逐层报告。
+    Construction **never raises**: component initialization failures are recorded
+    in ``self.problems`` and the corresponding layer becomes ``failed`` or
+    ``degraded``, so the CLI can report layer by layer.
 
     Attributes:
-        workdir: 工作目录（``.env``、``.agent/`` 均相对它）。
-        config: LLM 配置；加载失败时为 ``None``。
-        flat_store / tree: 工具能力层。
-        registry: 会话注册表。
-        store: SQLite 持久化。
-        proxy: 模型反向代理。
-        assembler: 上下文装配器。
+        workdir: Working directory (``.env`` and ``.agent/`` are relative to it).
+        config: LLM configuration; ``None`` when loading failed.
+        flat_store / tree: Tool capability layer.
+        registry: Session registry.
+        store: SQLite persistence.
+        proxy: Model reverse proxy.
+        assembler: Context assembler.
     """
 
     def __init__(
@@ -146,14 +154,16 @@ class HarnessService:
         load_model: bool = True,
         global_dir: str | Path | None = None,
     ) -> None:
-        """组装服务。
+        """Assemble the service.
 
         Args:
-            workdir: 工作目录；``.env`` 与 ``.agent/`` 都相对它解析。
-            capacity: 上下文容量（token）。
-            load_model: 是否加载模型通道。``False`` 时只做本地状态检查，
-                不校验 API Key，也不建立 HTTP 客户端。
-            global_dir: 全局目录（长期记忆所在）；省略时取工作目录。
+            workdir: Working directory; both ``.env`` and ``.agent/`` are resolved
+                relative to it.
+            capacity: Context capacity (tokens).
+            load_model: Whether to load the model channel. When ``False`` only
+                local state is checked: no API key validation and no HTTP client.
+            global_dir: Global directory (holding long-term memory); defaults to
+                the working directory.
         """
         self.workdir = Path(workdir).resolve()
         self.global_dir = Path(global_dir).resolve() if global_dir else self.workdir
@@ -164,18 +174,19 @@ class HarnessService:
         self.config: LLMConfig | None = None
         self.flat_store: FlatStore | None = None
         self.tree: ToolTree | None = None
-        #: 按 ``.agent/capabilities.json`` 装载的能力清单；未装载时为 None。
+        #: Capability manifest loaded from ``.agent/capabilities.json``; None if not loaded.
         self.capabilities: CapabilityManifest | None = None
         self.permissions: AgentPermissions = AgentPermissions(agent_id=LOCAL_AGENT)
         self.registry: SessionRegistry | None = None
         self.store: SessionStore | None = None
         self.proxy: ReverseProxy | None = None
         self.assembler: ContextAssembler | None = None
-        #: 工作记忆文件路径与本次是否新建（诊断用）。
+        #: Path of the working-memory file and whether this run created it (diagnostics).
         self.work_memory: Path | None = None
         self.work_memory_created = False
 
-        #: 是否尝试加载模型通道；``False`` 时该层状态为 ``not_loaded`` 而非降级
+        #: Whether the model channel was requested; when ``False`` the layer is
+        #: ``not_loaded`` rather than degraded.
         self.model_requested = load_model
 
         self._ensure_work_memory()
@@ -185,34 +196,37 @@ class HarnessService:
         if load_model:
             self._load_model()
 
-    # ------------------------------------------------------------ 装配
+    # --------------------------------------------------------- assembly
 
     def _ensure_work_memory(self) -> None:
-        """确保 ``<workdir>/.agent/WORK.md`` 存在（缺失时用模板创建）。
+        """Ensure ``<workdir>/.agent/WORK.md`` exists (created from the template if missing).
 
-        系统提示会告诉模型「本项目存在 ``.agent/WORK.md``」，但之前从未真的
-        创建它——模型第一次去读会拿到「文件不存在」，与提示词自相矛盾。
+        The system prompt tells the model "this project has ``.agent/WORK.md``",
+        but nothing ever created it -- the model's first read returned "file not
+        found", contradicting the prompt.
 
-        **失败不阻止启动**：工作记忆是辅助手段，没有它 agent 仍可工作，
-        因此只记入 ``problems`` 而不抛异常。
+        **Failure never blocks startup**: working memory is an aid, and the agent
+        still works without it, so failures are only recorded in ``problems``.
         """
         try:
             path, created = ensure_working_memory(self.workdir)
             self.work_memory = path
             self.work_memory_created = created
-        except Exception as exc:  # noqa: BLE001 - 降级而非崩溃
+        except Exception as exc:  # noqa: BLE001 - degrade instead of crashing
             self.problems.append(f"work_memory: {exc}")
 
-
     def _load_capability(self) -> None:
-        """装配工具能力层（扁平存储 + 派生树）。
+        """Assemble the tool capability layer (flat store + derived tree).
 
-        ponytail: 必须读 ``.agent/capabilities.json``，否则 CLI 看到的是一棵空树，
-        而 Web 服务按清单装载了实际工具——两边观测到的能力面不一致。
-        清单不存在或非法时退回空树（保守降级，与 I4 一致）。
+        Note: ``.agent/capabilities.json`` must be read here, otherwise the CLI
+        sees an empty tree while the web service loads the real tools from the
+        manifest -- the two sides would observe different capability surfaces.
+        A missing or invalid manifest falls back to an empty tree (conservative
+        degradation, consistent with I4).
 
-        权限从 ``.agent/permissions.json`` 读取（agent_id=``local``），
-        使 CLI 与运行时看到同一套屏蔽结果；文件缺失时为空表（全部允许）。
+        Permissions are read from ``.agent/permissions.json`` (agent_id=``local``)
+        so the CLI and the runtime see the same blocking results; a missing file
+        yields an empty table (everything allowed).
         """
         try:
             self.flat_store = FlatStore()
@@ -240,13 +254,13 @@ class HarnessService:
                 self.permissions,
                 group_descriptions=group_descriptions,
             )
-        except Exception as exc:  # noqa: BLE001 - 组合根必须降级而非崩溃
+        except Exception as exc:  # noqa: BLE001 - the composition root must degrade, not crash
             self.problems.append(f"capability: {exc}")
             self.flat_store = None
             self.tree = None
 
     def _load_session(self) -> None:
-        """装配会话注册表与 SQLite 持久化。"""
+        """Assemble the session registry and SQLite persistence."""
         try:
             self.registry = SessionRegistry(
                 EvictionPolicy(
@@ -255,7 +269,8 @@ class HarnessService:
                     sweep_interval_s=DEFAULT_SESSIONS.sweep_interval_s,
                 )
             )
-            # S2：启动后台周期清扫，否则空闲会话永不回收
+            # S2: start the background periodic sweep, otherwise idle sessions
+            # are never reclaimed
             self.registry.start_sweeper()
         except Exception as exc:  # noqa: BLE001
             self.problems.append(f"session-registry: {exc}")
@@ -268,7 +283,7 @@ class HarnessService:
             self.store = None
 
     def _load_context(self) -> None:
-        """装配上下文装配器（不注入 summarizer，压缩按 I4 无损跳过）。"""
+        """Assemble the context assembler (no summarizer injected; compression degrades losslessly per I4)."""
         try:
             self.assembler = ContextAssembler(capacity=self.capacity)
         except Exception as exc:  # noqa: BLE001
@@ -276,12 +291,12 @@ class HarnessService:
             self.assembler = None
 
     def _load_model(self) -> None:
-        """装配模型通道（密钥从环境变量读取）。"""
+        """Assemble the model channel (secret read from the environment)."""
         try:
             self.config = load_llm_config(dotenv_path=self.workdir / ".env")
             self.proxy = build_proxy(self.config)
         except ConfigError as exc:
-            # 配置缺失是可预期状态：降级而不是失败
+            # Missing configuration is an expected state: degrade, do not fail
             self.problems.append(f"model: {exc}")
             self.config = None
             self.proxy = None
@@ -290,10 +305,10 @@ class HarnessService:
             self.config = None
             self.proxy = None
 
-    # ------------------------------------------------------------ 观测
+    # ---------------------------------------------------------- observation
 
     def status(self) -> ServiceStatus:
-        """返回只读状态快照（无副作用）。"""
+        """Return a read-only status snapshot (side-effect free)."""
         layers = [
             self._capability_layer(),
             self._session_layer(),
@@ -344,7 +359,7 @@ class HarnessService:
             mode = self.store.journal_mode
             records = self.store.list_sessions()
         except Exception as exc:  # noqa: BLE001
-            return LayerStatus("store", "degraded", f"读取失败: {exc}")
+            return LayerStatus("store", "degraded", f"read failed: {exc}")
         return LayerStatus(
             "store",
             "ready",
@@ -372,8 +387,9 @@ class HarnessService:
 
     def _model_layer(self) -> LayerStatus:
         if not self.model_requested:
-            # 主动跳过模型加载：不算降级，避免 --no-model 时整体状态变 WARN
-            return LayerStatus("model", "not_loaded", "按参数跳过模型通道")
+            # Model loading was deliberately skipped: not a degradation, so
+            # ``--no-model`` does not turn the overall state into WARN.
+            return LayerStatus("model", "not_loaded", "model channel skipped by request")
         if self.proxy is None or self.config is None:
             return LayerStatus("model", "degraded", self._problem_of("model"))
         return LayerStatus(
@@ -392,29 +408,30 @@ class HarnessService:
         for item in self.problems:
             if item.startswith(prefix):
                 return item
-        return "未初始化"
+        return "not initialized"
 
-    # ------------------------------------------------------------ 运维
+    # -------------------------------------------------------- operations
 
     def new_tree_session_state(self) -> TreeSessionState:
-        """为一个新会话创建树查询状态（``delivered`` + 已发现清单）。
+        """Create tree-query state for a new session (``delivered`` + discovered inventory).
 
-        B14：两个缓存必须在同一把锁内读写，因此不单独暴露。
+        B14: the two caches must be read and written under the same lock, so they
+        are never exposed separately.
         """
         return TreeSessionState(DiscoveredTools(), TreeQueryState())
 
     def new_trace_logger(self, session_id: str) -> TraceLogger:
-        """为会话创建轨迹写入器（一会话一 JSONL，E3）。"""
+        """Create a trace writer for the session (one JSONL per session, E3)."""
         return TraceLogger(self.workdir / ".agent" / "traces", session_id)
 
     def sweep(self) -> list[str]:
-        """驱逐可卸载的空闲会话，返回被卸载的会话 id。"""
+        """Evict unloadable idle sessions; returns the ids that were unloaded."""
         if self.registry is None:
             return []
         return self.registry.sweep()
 
     def close(self) -> None:
-        """释放持久化连接（幂等）。"""
+        """Release the persistence connection (idempotent)."""
         if self.registry is not None:
             try:
                 self.registry.stop_sweeper()
@@ -428,7 +445,7 @@ class HarnessService:
 
 
 def _worst_state(layers: list[LayerStatus]) -> str:
-    """按严重程度归并各层状态（``not_loaded`` 视为可用）。"""
+    """Merge layer states by severity (``not_loaded`` counts as usable)."""
     states = {layer.state for layer in layers}
     if "failed" in states:
         return "failed"
@@ -443,12 +460,12 @@ def build_service(
     capacity: int | None = None,
     load_model: bool = True,
 ) -> HarnessService:
-    """便捷构造函数。
+    """Convenience constructor.
 
     Args:
-        workdir: 工作目录。
-        capacity: 上下文容量；省略时取默认值。
-        load_model: 是否加载模型通道。
+        workdir: Working directory.
+        capacity: Context capacity; defaults when omitted.
+        load_model: Whether to load the model channel.
     """
     return HarnessService(
         workdir,
@@ -458,7 +475,7 @@ def build_service(
 
 
 def default_execution_limits() -> dict[str, int]:
-    """执行层默认限额（供 CLI 展示）。"""
+    """Execution-layer default limits (for CLI display)."""
     return {
         "max_workers": DEFAULT_EXECUTION.max_workers,
         "chat_capacity": DEFAULT_EXECUTION.chat_capacity,
