@@ -1,20 +1,24 @@
-"""MCP 客户端：JSON-RPC 2.0 over stdio。
+"""MCP client: JSON-RPC 2.0 over stdio.
 
-对应文档：`docs/06-工具分组与外来能力.md` 第四节。
+See section 4 of the tool-groups-and-external-capabilities doc.
 
-设计要点：
+Design notes:
 
-* **只实现 stdio 传输**（覆盖 ``npx @modelcontextprotocol/server-*`` 这类
-  最常见的启动方式）；HTTP/SSE 预留扩展位，本期不实现。
-* **短连接**：每次调用 spawn 子进程，完成 ``initialize`` → ``tools/call``
-  → 关闭。简单、无状态泄漏；代价是每次有进程启动开销。常驻连接留作后续
-  优化（需要处理进程崩溃与重启）。
-* **清单快照**：``tools/list`` 的结果在 ``mcp add`` 时一次性拉取并写入
-  能力清单。这样运行时不需要为「发现工具」而拉起服务器，只有真正调用
-  某个工具时才 spawn。
-* **不在导入时执行任何进程**：本模块只提供函数，不产生副作用。
+* **stdio transport only** (covers the most common launch style, e.g.
+  ``npx @modelcontextprotocol/server-*``); HTTP/SSE is reserved for a later
+  extension and not implemented yet.
+* **Short-lived connections**: each call spawns a child process, performs
+  ``initialize`` -> ``tools/call`` -> closes. Simple, with no state leakage; the
+  cost is process startup overhead per call. Persistent connections are left as
+  a later optimization (they require handling crashes and restarts).
+* **Manifest snapshot**: the ``tools/list`` result is fetched once at ``mcp add``
+  time and written into the capability manifest. The runtime therefore never has
+  to start a server just to "discover tools"; it spawns only when a tool is
+  actually called.
+* **No process runs at import time**: this module only offers functions and has
+  no side effects.
 
-协议版本采用 ``2024-11-05``（MCP 首个稳定版）。
+The protocol version is ``2024-11-05`` (MCP's first stable release).
 """
 
 from __future__ import annotations
@@ -37,26 +41,26 @@ __all__ = [
     "call_tool",
 ]
 
-#: 使用的 MCP 协议版本。
+#: The MCP protocol version in use.
 PROTOCOL_VERSION = "2024-11-05"
 
-#: 单次 JSON-RPC 往返的超时（秒）。
+#: Timeout for a single JSON-RPC round trip (seconds).
 DEFAULT_TIMEOUT = 120.0
 
 
 class McpError(RuntimeError):
-    """MCP 通讯失败（进程启动失败、协议错误、超时）。"""
+    """MCP communication failed (process start failure, protocol error, timeout)."""
 
 
 @dataclass(frozen=True)
 class McpServerConfig:
-    """一个 MCP 服务器的启动配置。
+    """Launch configuration for one MCP server.
 
     Attributes:
-        name: 服务器名，同时作为工具树上的分组名（``/mcp/<name>``）。
-        command: 可执行文件，如 ``npx`` / ``python``。
-        args: 传给命令的参数。
-        env: 追加的环境变量（覆盖同名项）。
+        name: Server name, also used as the tool-tree group name (``/mcp/<name>``).
+        command: Executable, e.g. ``npx`` / ``python``.
+        args: Arguments passed to the command.
+        env: Extra environment variables (overriding same-named ones).
     """
 
     name: str
@@ -66,7 +70,7 @@ class McpServerConfig:
     cwd: str = ""
 
     def to_dict(self) -> dict[str, Any]:
-        """导出为清单中的 JSON 结构。"""
+        """Export as the JSON structure used in the manifest."""
         payload: dict[str, Any] = {"name": self.name, "command": self.command}
         if self.args:
             payload["args"] = list(self.args)
@@ -78,7 +82,7 @@ class McpServerConfig:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> McpServerConfig:
-        """从清单结构还原。"""
+        """Restore from the manifest structure."""
         env = data.get("env") or {}
         return cls(
             name=data["name"],
@@ -90,45 +94,45 @@ class McpServerConfig:
 
 
 def load_mcp_servers(workdir: str | Path) -> dict[str, McpServerConfig]:
-    """从能力清单读取 MCP 服务器声明。
+    """Read MCP server declarations from the capability manifest.
 
     Raises:
-        McpError: 清单不可读或结构非法。
+        McpError: The manifest is unreadable or structurally invalid.
     """
     from harness.capabilities import load_manifest
 
     try:
         manifest = load_manifest(workdir)
-    except Exception as exc:  # noqa: BLE001 - 统一转成 MCP 侧错误
-        raise McpError(f"读取能力清单失败: {exc}") from exc
+    except Exception as exc:  # noqa: BLE001 - unify into an MCP-side error
+        raise McpError(f"failed to read the capability manifest: {exc}") from exc
 
     servers: dict[str, McpServerConfig] = {}
     for entry in manifest.mcp_servers:
         try:
             config = McpServerConfig.from_dict(entry)
         except KeyError as exc:
-            raise McpError(f"MCP 服务器声明缺少字段 {exc}: {entry!r}") from exc
+            raise McpError(f"MCP server declaration is missing field {exc}: {entry!r}") from exc
         servers[config.name] = config
     return servers
 
 
 def _resolve_command(command: str) -> list[str]:
-    """解析启动命令，兼容 Windows 的 ``.cmd`` / ``.bat`` 包装脚本。
+    """Resolve a launch command, handling Windows ``.cmd`` / ``.bat`` wrappers.
 
-    Windows 上 npm 系工具（``npx``、``uvx`` 等）不是可执行文件，而是
-    ``npx.cmd``。``subprocess`` 直接传 ``"npx"`` 会抛 ``FileNotFoundError``，
-    必须显式找到 ``.cmd`` 并透过 ``cmd.exe /c`` 启动（否则 CreateProcess
-    也不接受 .cmd）。
+    On Windows the npm toolchain (``npx``, ``uvx``, ...) ships ``npx.cmd`` rather
+    than an executable. Passing ``"npx"`` straight to ``subprocess`` raises
+    ``FileNotFoundError``, so we must locate the ``.cmd`` explicitly and launch it
+    through ``cmd.exe /c`` (CreateProcess refuses ``.cmd`` files directly).
 
-    POSIX 上原样返回，交给系统 ``exec``。
+    On POSIX the command is returned unchanged for the system ``exec``.
 
     Returns:
-        可直接传给 ``subprocess.Popen`` 的参数列表。
+        An argument list usable directly with ``subprocess.Popen``.
     """
     if os.name != "nt":
         return [command]
 
-    # 已经带扩展名（如 python.exe）或本身就是路径 → 直接用
+    # Already has an extension (e.g. python.exe) or is itself a path -> use as-is
     suffix = Path(command).suffix.lower()
     if suffix in {".exe", ".cmd", ".bat", ".com"}:
         return [command]
@@ -137,16 +141,20 @@ def _resolve_command(command: str) -> list[str]:
         f"{command}.bat"
     )
     if not found:
-        return [command]  # 交给 Popen 抛 FileNotFoundError，由上层翻译成 McpError
+        # Let Popen raise FileNotFoundError; the caller translates it to McpError
+        return [command]
 
     if found.lower().endswith((".cmd", ".bat")):
-        # .cmd/.bat 必须经 cmd.exe 解释；/c 表示执行后退出
+        # .cmd/.bat must be interpreted by cmd.exe; /c means run then exit
         return ["cmd.exe", "/c", found]
     return [found]
 
 
 def _spawn(config: McpServerConfig, workdir: str) -> subprocess.Popen[str]:
-    """拉起 MCP 服务器子进程，stdin/stdout 走管道，stderr 收集用于诊断。"""
+    """Spawn the MCP server child process with piped stdin/stdout.
+
+    stderr is captured for diagnostics.
+    """
     env = dict(os.environ)
     env.update(dict(config.env))
     env.setdefault("PYTHONIOENCODING", "utf-8")
@@ -168,21 +176,21 @@ def _spawn(config: McpServerConfig, workdir: str) -> subprocess.Popen[str]:
         )
     except FileNotFoundError as exc:
         raise McpError(
-            f"找不到 MCP 服务命令 {config.command!r}；"
-            "请确认它已安装且在 PATH 中"
-            + ("（Windows 上 npm 工具请确保 npx.cmd 存在）" if os.name == "nt" else "")
+            f"MCP command not found: {config.command!r}; "
+            "make sure it is installed and on PATH"
+            + (" (on Windows npm tools need npx.cmd)" if os.name == "nt" else "")
         ) from exc
 
 
 def _send(proc: subprocess.Popen[str], payload: dict[str, Any]) -> None:
-    """写一行 JSON-RPC 消息。"""
+    """Write one JSON-RPC message as a line."""
     assert proc.stdin is not None
     proc.stdin.write(json.dumps(payload, ensure_ascii=False) + "\n")
     proc.stdin.flush()
 
 
 def _recv(proc: subprocess.Popen[str], timeout: float = DEFAULT_TIMEOUT) -> dict[str, Any]:
-    """读一行 JSON-RPC 响应（跳过通知与日志行）。"""
+    """Read one JSON-RPC response line (skipping notifications and log lines)."""
     assert proc.stdout is not None
     import threading
 
@@ -194,7 +202,7 @@ def _recv(proc: subprocess.Popen[str], timeout: float = DEFAULT_TIMEOUT) -> dict
             while True:
                 line = proc.stdout.readline() if proc.stdout else ""
                 if not line:
-                    error.append(McpError("MCP 服务器提前关闭了输出流"))
+                    error.append(McpError("the MCP server closed its output stream early"))
                     return
                 text = line.strip()
                 if not text:
@@ -202,7 +210,7 @@ def _recv(proc: subprocess.Popen[str], timeout: float = DEFAULT_TIMEOUT) -> dict
                 try:
                     message = json.loads(text)
                 except json.JSONDecodeError:
-                    continue  # 服务器可能把日志写到 stdout，忽略
+                    continue  # servers may log to stdout; ignore those lines
                 if isinstance(message, dict) and ("result" in message or "error" in message):
                     result.update(message)
                     return
@@ -213,7 +221,7 @@ def _recv(proc: subprocess.Popen[str], timeout: float = DEFAULT_TIMEOUT) -> dict
     thread.start()
     thread.join(timeout)
     if thread.is_alive():
-        raise McpError(f"MCP 调用超时（{timeout:.0f}s）")
+        raise McpError(f"MCP call timed out ({timeout:.0f}s)")
     if error:
         raise McpError(str(error[0]))
     return result
@@ -225,7 +233,10 @@ def _request(
     method: str,
     params: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """发一条请求并等对应响应；服务端返回 error 时抛 ``McpError``。"""
+    """Send a request and await its response.
+
+    Raises ``McpError`` when the server returns an error.
+    """
     payload: dict[str, Any] = {"jsonrpc": "2.0", "id": request_id, "method": method}
     if params is not None:
         payload["params"] = params
@@ -233,12 +244,12 @@ def _request(
     response = _recv(proc)
     if "error" in response:
         err = response["error"] or {}
-        raise McpError(f"MCP {method} 失败: {err.get('message', err)}")
+        raise McpError(f"MCP {method} failed: {err.get('message', err)}")
     return response.get("result") or {}
 
 
 def _bootstrap(proc: subprocess.Popen[str]) -> dict[str, Any]:
-    """完成 initialize 握手并发送 initialized 通知。"""
+    """Complete the initialize handshake and send the initialized notification."""
     result = _request(
         proc,
         1,
@@ -254,10 +265,10 @@ def _bootstrap(proc: subprocess.Popen[str]) -> dict[str, Any]:
 
 
 def list_tools(config: McpServerConfig, workdir: str = ".") -> list[dict[str, Any]]:
-    """拉取服务器暴露的工具清单（``tools/list``）。
+    """Fetch the tool list the server exposes (``tools/list``).
 
     Returns:
-        每项形如 ``{"name": str, "description": str, "inputSchema": dict}``。
+        Items shaped like ``{"name": str, "description": str, "inputSchema": dict}``.
     """
     proc = _spawn(config, workdir)
     try:
@@ -275,10 +286,10 @@ def call_tool(
     arguments: dict[str, Any],
     workdir: str = ".",
 ) -> str:
-    """调用服务器上的一个工具（``tools/call``），返回拼接后的文本结果。
+    """Call one tool on the server (``tools/call``) and return the concatenated text result.
 
-    结果里的 ``content`` 数组按项拼接：``text`` 直接取，其他类型做 JSON
-    序列化，避免丢信息。
+    Items of the ``content`` array are concatenated: ``text`` is taken directly and
+    other kinds are JSON-serialized so no information is lost.
     """
     proc = _spawn(config, workdir)
     try:
@@ -303,18 +314,18 @@ def call_tool(
         else:
             parts.append(json.dumps(item, ensure_ascii=False))
     if result.get("isError"):
-        raise McpError("".join(parts) or f"MCP 工具 {tool_name} 返回错误")
+        raise McpError("".join(parts) or f"MCP tool {tool_name} returned an error")
     return "\n".join(parts)
 
 
 def _shutdown(proc: subprocess.Popen[str]) -> None:
-    """关闭子进程：先关 stdin，再等短暂超时，最后强杀。"""
+    """Shut down the child process: close stdin, wait briefly, then kill."""
     if proc.stdin:
         with contextlib.suppress(Exception):
             proc.stdin.close()
     try:
         proc.wait(timeout=5)
-    except Exception:  # noqa: BLE001 - 超时则终止
+    except Exception:  # noqa: BLE001 - terminate on timeout
         proc.kill()
         with contextlib.suppress(Exception):
             proc.wait(timeout=5)
@@ -326,7 +337,7 @@ def _shutdown(proc: subprocess.Popen[str]) -> None:
 
 
 def stderr_tail(proc: subprocess.Popen[str], limit: int = 2000) -> str:
-    """读取子进程 stderr 尾部（诊断用）。"""
+    """Read the tail of the child's stderr (for diagnostics)."""
     if proc.stderr is None:
         return ""
     try:
