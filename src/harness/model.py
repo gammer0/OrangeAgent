@@ -31,10 +31,13 @@ __all__ = [
     "OpenAIAdapter",
     "AnthropicAdapter",
     "LLMResponse",
+    "ToolSpec",
     "Transport",
     "OpenAITransport",
     "ReverseProxy",
     "ProviderConfig",
+    "encode_tool_name",
+    "decode_tool_name",
 ]
 
 
@@ -52,6 +55,52 @@ class ModelError(Exception):
         super().__init__(f"[{provider}] {message}")
 
 
+#: 工具路径 → provider 函数名的分隔符替换。
+#:
+#: OpenAI 协议要求 function.name 匹配 ``^[a-zA-Z0-9_-]+$``，不允许 ``/``；
+#: 而内部 ``ToolCall.name`` 必须是完整绝对路径（A10）。因此在**适配器边界**
+#: 做一次可逆编码：``/tool/os/file/read`` → ``tool__os__file__read``。
+#: 内部语义与文档约束不变，只有出网请求体使用编码名。
+_NAME_SEP = "__"
+_PATH_SEP = "/"
+
+
+def encode_tool_name(path: str) -> str:
+    """把工具路径编码为符合 provider 约束的函数名。
+
+    Args:
+        path: 以 ``/`` 开头的完整绝对路径。
+
+    Returns:
+        仅含字母、数字、下划线与连字符的函数名。
+
+    Raises:
+        ValueError: 路径中含无法无损编码的字符。
+    """
+    stripped = path.strip(_PATH_SEP)
+    if not stripped:
+        raise ValueError(f"工具路径不得为空：{path!r}")
+    encoded = stripped.replace(_PATH_SEP, _NAME_SEP)
+    for ch in encoded:
+        if not (ch.isalnum() or ch in "_-"):
+            raise ValueError(f"工具路径含非法字符 {ch!r}：{path!r}")
+    return encoded
+
+
+def decode_tool_name(name: str) -> str:
+    """把 provider 返回的函数名还原为工具绝对路径。
+
+    Args:
+        name: 模型返回的函数名；若已是绝对路径则原样返回（幂等）。
+
+    Returns:
+        ``/`` 开头的完整路径。
+    """
+    if name.startswith(_PATH_SEP):
+        return name
+    return _PATH_SEP + name.replace(_NAME_SEP, _PATH_SEP)
+
+
 @dataclass(frozen=True, slots=True)
 class LLMResponse:
     """适配器解析后的统一响应。
@@ -67,6 +116,10 @@ class LLMResponse:
     tokens_in: int = 0
     tokens_out: int = 0
     model: str = ""
+
+
+#: 工具声明：OpenAI ``tools`` 数组中的单个元素。
+ToolSpec = dict[str, Any]
 
 
 class Transport(Protocol):
@@ -90,6 +143,7 @@ class Adapter(Protocol):
         temperature: float,
         max_tokens: int,
         discovered: list[dict[str, str]] | None = None,
+        tools: Sequence[ToolSpec] | None = None,
     ) -> dict[str, Any]:
         """把消息投影为供应商请求体。"""
         ...
@@ -117,17 +171,24 @@ class OpenAIAdapter:
         temperature: float,
         max_tokens: int,
         discovered: list[dict[str, str]] | None = None,
+        tools: Sequence[ToolSpec] | None = None,
     ) -> dict[str, Any]:
         """投影消息并按 Chat Completions 格式组装请求体。
 
         已发现工具清单以**末尾临时 system 消息**注入（A11–A13），不写入历史。
+        ``tools`` 非空时必须随请求声明，否则模型会把工具调用当作普通文本输出。
         """
-        return {
+        body: dict[str, Any] = {
             "model": model,
             "messages": to_provider(list(messages), discovered),
             "temperature": temperature,
             "max_tokens": max_tokens,
         }
+        if tools:
+            # provider 只接受 ^[a-zA-Z0-9_-]+$ 的函数名，路径需编码后出网
+            body["tools"] = [_encode_spec(item) for item in tools]
+            body["tool_choice"] = "auto"
+        return body
 
     def parse_response(self, payload: dict[str, Any]) -> LLMResponse:
         """解析 ``choices[0].message``。
@@ -147,7 +208,7 @@ class OpenAIAdapter:
             tool_calls.append(
                 ToolCall(
                     id=str(item.get("id", "")),
-                    name=str(function.get("name", "")),
+                    name=decode_tool_name(str(function.get("name", ""))),
                     arguments=str(function.get("arguments", "{}")),
                 )
             )
@@ -189,6 +250,7 @@ class AnthropicAdapter:
         temperature: float,
         max_tokens: int,
         discovered: list[dict[str, str]] | None = None,
+        tools: Sequence[ToolSpec] | None = None,
     ) -> dict[str, Any]:
         """按 Messages 协议拆分 system 与对话轮次。"""
         system_parts: list[str] = []
@@ -244,6 +306,18 @@ class AnthropicAdapter:
             "temperature": temperature,
             "max_tokens": max_tokens,
         }
+        if tools:
+            # Anthropic 的 tools 用 input_schema 而非 function.parameters
+            body["tools"] = [
+                {
+                    "name": encode_tool_name(item["function"]["name"]),
+                    "description": item["function"].get("description", ""),
+                    "input_schema": item["function"].get(
+                        "parameters", {"type": "object", "properties": {}}
+                    ),
+                }
+                for item in tools
+            ]
         if system_parts:
             body["system"] = "\n\n".join(system_parts)
         return body
@@ -263,7 +337,7 @@ class AnthropicAdapter:
                 tool_calls.append(
                     ToolCall(
                         id=str(block.get("id", "")),
-                        name=str(block.get("name", "")),
+                        name=decode_tool_name(str(block.get("name", ""))),
                         arguments=_dump_json(block.get("input") or {}),
                     )
                 )
@@ -290,6 +364,19 @@ def _safe_json(raw: str) -> Any:
         return json.loads(raw)
     except (ValueError, TypeError):
         return raw
+
+
+def _encode_spec(spec: ToolSpec) -> ToolSpec:
+    """把工具声明中的路径名编码为 provider 可接受的函数名。
+
+    输入形如 ``{"type": "function", "function": {"name": "/a/b", ...}}``，
+    返回深拷贝，仅替换 ``function.name``，不修改调用方对象。
+    """
+    function = dict(spec.get("function") or {})
+    function["name"] = encode_tool_name(str(function.get("name", "")))
+    encoded = dict(spec)
+    encoded["function"] = function
+    return encoded
 
 
 def _dump_json(value: Any) -> str:
@@ -403,6 +490,7 @@ class ReverseProxy:
         session_id: str,
         discovered: list[dict[str, str]] | None = None,
         model: str | None = None,
+        tools: Sequence[ToolSpec] | None = None,
     ) -> LLMResponse:
         """发起一次模型调用。
 
@@ -437,6 +525,7 @@ class ReverseProxy:
                     session_id=session_id,
                     discovered=discovered,
                     model=model or provider.model,
+                    tools=tools,
                 )
             except RateLimitError:
                 # 限流是全局约束，不属于供应商故障：直接上抛，不计入健康度
@@ -464,6 +553,7 @@ class ReverseProxy:
         session_id: str,
         discovered: list[dict[str, str]] | None,
         model: str,
+        tools: Sequence[ToolSpec] | None = None,
     ) -> LLMResponse:
         """对单个供应商做限流检查与退避重试。"""
         body = provider.adapter.build_request(
@@ -472,6 +562,7 @@ class ReverseProxy:
             temperature=self.temperature,
             max_tokens=self.max_tokens,
             discovered=discovered,
+            tools=tools,
         )
         estimated = _estimate_request_tokens(body)
 
