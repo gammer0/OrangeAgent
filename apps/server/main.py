@@ -122,6 +122,9 @@ def _build_manager(workdir: Path) -> tuple[SessionManager | None, str | None]:
         default_model=config.model,
         capacity=DEFAULT_CONTEXT.capacity,
     )
+    # P1: bring previously persisted sessions back into memory so a restart no
+    # longer wipes the conversation list.
+    manager.restore()
     return manager, None
 
 
