@@ -1,0 +1,2 @@
+{"session_id":"s1","step":0,"ts":1792325678.2185981,"kind":"inject","payload":{"channel":"chat","content_chars":3}}
+{"session_id":"s1","step":1,"ts":1792325678.2191634,"kind":"tool_exec","payload":{"path":"/tool/os/file/read","tool_id":"c1","arguments":{"path":"a"},"ok":true,"error_type":null,"duration_ms":1.0}}
