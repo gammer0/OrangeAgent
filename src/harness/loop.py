@@ -29,6 +29,7 @@ from harness.exceptions import MessageInvariantError
 from harness.execution import BatchPlan, ExecResult, fill_placeholders, plan_batch
 from harness.executor import Committed
 from harness.inbox import Inbox, InterruptRequest
+from harness.jev import JevRouter
 from harness.message import (
     AssistantMsg,
     Message,
@@ -38,6 +39,7 @@ from harness.message import (
     UserMsg,
     validate_messages,
 )
+from harness.routing import RouteDecision
 
 __all__ = [
     "DeadlockTracker",
@@ -224,6 +226,7 @@ class LoopResult:
     stop_reason: str | None
     aborted: bool = False
     trace: list[str] = field(default_factory=list)
+    route: RouteDecision | None = None
 
 
 class AgentLoop:
@@ -250,6 +253,11 @@ class AgentLoop:
         controller: StepController | None = None,
         hooks: LoopHooks | None = None,
         max_workers: int = 4,
+        assembler: Any | None = None,
+        router: JevRouter | None = None,
+        branch_provider: Callable[[], Sequence[str]] | None = None,
+        tool_count_provider: Callable[[], int] | None = None,
+        history_tokens_provider: Callable[[int], int] | None = None,
     ) -> None:
         self.model = model
         self.inbox = inbox
@@ -259,6 +267,18 @@ class AgentLoop:
         self.controller = controller or StepController()
         self.hooks = hooks or LoopHooks()
         self.max_workers = max_workers
+        #: 可选上下文装配器；不传则按朴素实现直接调用模型（I4 无损退化）。
+        self.assembler = assembler
+        #: 可选 Jev 路由器；不传则不路由（等价全量暴露）。
+        self.router = router
+        #: 候选一级分支获取器；与 ``router`` 配对使用。
+        self.branch_provider = branch_provider
+        #: 工具总数获取器，用于路由启用条件判定。
+        self.tool_count_provider = tool_count_provider
+        #: 历史 token 获取器，用于路由启用条件判定。
+        self.history_tokens_provider = history_tokens_provider
+        #: 最近一次路由决策（便于外部写轨迹）。
+        self.last_route: RouteDecision | None = None
 
     # ------------------------------------------------------------ 主循环
 
@@ -286,7 +306,8 @@ class AgentLoop:
 
             validate_messages(messages)
 
-            assistant = self.model.chat(messages)
+            outgoing = self._assemble(messages)
+            assistant = self.model.chat(outgoing)
             messages.append(assistant)
             if self.hooks.on_assistant is not None:
                 self.hooks.on_assistant(assistant)
@@ -294,6 +315,9 @@ class AgentLoop:
             if assistant.is_final:
                 final_text = assistant.content
                 break
+
+            # ---- Jev 路由（优化路径，失败即全量，I4）----
+            self._maybe_route(messages)
 
             # ---- 工具批次 ----
             plan = plan_batch(list(assistant.tool_calls), self._concurrency_of)
@@ -324,6 +348,60 @@ class AgentLoop:
             steps=self.controller.step,
             stop_reason=self.controller.stop_reason,
             aborted=aborted,
+            route=self.last_route,
+        )
+
+    # ------------------------------------------------------------ 上下文装配
+
+    def _assemble(self, messages: list[Message]) -> list[Message]:
+        """装配待发送消息（C1/C2/C3）。
+
+        未注入 ``assembler`` 时直接返回原列表——优化缺失必须无损退化（I4）。
+        水位达到 ``session_end`` 时登记收尾原因，本轮不再继续推进。
+        """
+        if self.assembler is None:
+            return messages
+
+        result = self.assembler.assemble(messages)
+        if result.compressed:
+            # 压缩会重建列表，必须用新列表继续，否则后续追加会写到旧对象
+            messages[:] = result.messages
+            if self.hooks.on_summary is not None:
+                self.hooks.on_summary(result.action)
+
+        if result.action == "session_end":
+            self.controller.mark_stop("session_end")
+
+        return result.messages
+
+    # ------------------------------------------------------------ 路由
+
+    def _maybe_route(self, messages: list[Message]) -> None:
+        """按启用条件执行一次 Jev 路由。
+
+        ``state`` 只放 query（最后一条 UserMsg），不放任何工具输出；
+        任何异常都收敛为回退决策（I4）。
+        """
+        if self.router is None or self.branch_provider is None:
+            return
+
+        branches = list(self.branch_provider())
+        if not branches:
+            return
+
+        query = _last_user_text(messages)
+        history_tokens = (
+            self.history_tokens_provider(len(messages))
+            if self.history_tokens_provider is not None
+            else 0
+        )
+        tool_count = self.tool_count_provider() if self.tool_count_provider is not None else 0
+
+        self.last_route = self.router.route(
+            query,
+            branches,
+            history_tokens=history_tokens,
+            tool_count=tool_count,
         )
 
     # ------------------------------------------------------------ 批次执行
@@ -449,3 +527,14 @@ def _has_unclosed_tool_calls(messages: Sequence[Message]) -> bool:
         elif isinstance(msg, ToolMsg):
             pending.discard(msg.tool_call_id)
     return bool(pending)
+
+
+def _last_user_text(messages: Sequence[Message]) -> str:
+    """取最近一条 ``UserMsg`` 的文本，作为路由 query。
+
+    文档 §4.4：``state`` 只放 query，不放工具输出（防 JPDH）。
+    """
+    for msg in reversed(messages):
+        if isinstance(msg, UserMsg):
+            return msg.content
+    return ""
