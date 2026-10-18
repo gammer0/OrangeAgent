@@ -106,6 +106,29 @@ class TestGateSchema:
             "actual": "integer",
         }
 
+    def test_type_mismatch_not_duplicated(self) -> None:
+        """类型错误只能报一次。
+
+        ② 关判「类型不符」、③ 关判「转不动」，两关会对同一字段各报一条。
+        重复条目会让模型误以为有两个字段出错（实测模型曾主动指出这一点）。
+        """
+        payload, _ = _err('{"path": 123}')
+        assert len(payload["errors"]) == 1
+        assert len(payload["errors"]) == len({e["field"] + e["kind"] for e in payload["errors"]})
+
+    def test_dict_type_mismatch_not_duplicated(self) -> None:
+        """非字符串类型同样不能重复报告（它们不走 ③ 关的可转换路径）。"""
+        payload, _ = _err('{"path": {"a": 1}}')
+        assert len(payload["errors"]) == 1
+        assert payload["errors"][0]["actual"] == "object"
+
+    def test_multiple_distinct_errors_all_kept(self) -> None:
+        """去重只针对同一 (field, kind)，不同字段的错误必须都保留。"""
+        payload, _ = _err('{"offset": "abc"}')
+        kinds = {(e["field"], e["kind"]) for e in payload["errors"]}
+        assert ("path", "missing") in kinds
+        assert ("offset", "type") in kinds
+
     def test_enum_violation_reports_allowed(self) -> None:
         """② 关：枚举非法 → kind=enum + allowed。"""
         payload, _ = _err('{"path": "a", "mode": "turbo"}')

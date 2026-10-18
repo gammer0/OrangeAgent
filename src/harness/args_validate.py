@@ -327,9 +327,21 @@ def validate_arguments(raw: str, schema: dict[str, Any]) -> ValidationOutcome:
     # 三关合并：类型转换失败属于 ③ 关，但仍与 ② 关的错误一起回填（J2：一次给全）
     pruned = _prune_extras(data, schema)
     params, conversion_issues = _coerce_params(pruned, schema)
-    if schema_issues or params is None:
+
+    # ② 与 ③ 可能对同一字段报同一条 type 错误（② 判类型不符、③ 转不动）。
+    # 重复条目会让模型误以为有两个字段出错，这里去重：同一 (field, kind) 只留一条。
+    merged: list[ArgIssue] = []
+    seen: set[tuple[str, str]] = set()
+    for issue in [*schema_issues, *conversion_issues]:
+        key = (issue.field, issue.kind)
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(issue)
+
+    if merged:
         stage = "schema" if schema_issues else "coerce"
-        return None, _fail(stage, [*schema_issues, *conversion_issues])
+        return None, _fail(stage, merged)
 
     return ArgumentValidation(params=params, canonical=canonical, ignored=ignored), None
 
