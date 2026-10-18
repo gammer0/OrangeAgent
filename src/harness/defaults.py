@@ -1,12 +1,16 @@
-"""默认配置清单（单一真源）。
+"""Default configuration inventory (single source of truth).
 
-本模块把 `docs/04-初始配置清单.md` 中的超参数集中为可导入常量，
-便于：
-* 文档与代码互相校验（`tests/test_defaults.py` 断言两者一致）；
-* 新会话一次性读取全部默认值，而不是散落在各模块。
+This module collects the hyperparameters from the initial-configuration doc
+into importable constants so that:
 
-**优先级**：环境变量（`.env` / 进程环境）> 本模块默认值。
-密钥永远不在此处，由 :mod:`harness.config` 从环境变量读取。
+* docs and code can validate each other (``tests/test_defaults.py`` asserts
+  both stay in sync);
+* a new session can read every default in one place instead of picking
+  values up from scattered modules.
+
+**Precedence**: environment variables (``.env`` / process env) > the defaults
+in this module. Secrets never live here; :mod:`harness.config` reads them
+from the environment.
 """
 
 from __future__ import annotations
@@ -34,7 +38,7 @@ __all__ = [
 
 @dataclass(frozen=True, slots=True)
 class ContextDefaults:
-    """上下文与压缩默认值（C1/C2/C3）。"""
+    """Context assembly and compression defaults (C1/C2/C3)."""
 
     capacity: int = 32_768
     auto_1: float = 0.50
@@ -48,7 +52,7 @@ class ContextDefaults:
 
 @dataclass(frozen=True, slots=True)
 class LoopDefaults:
-    """循环与终止默认值。"""
+    """Loop and termination defaults."""
 
     max_steps: int = 40
     max_injects: int = 10
@@ -57,7 +61,7 @@ class LoopDefaults:
 
 @dataclass(frozen=True, slots=True)
 class ExecutionDefaults:
-    """执行与并发默认值。"""
+    """Execution and concurrency defaults."""
 
     max_workers: int = 4
     chat_capacity: int = 100
@@ -65,7 +69,7 @@ class ExecutionDefaults:
 
 @dataclass(frozen=True, slots=True)
 class ToolDefaults:
-    """工具树与路由默认值。"""
+    """Tool-tree and routing defaults."""
 
     tree_enable_threshold: int = 15
     route_tool_count: int = 30
@@ -81,7 +85,7 @@ class ToolDefaults:
 
 @dataclass(frozen=True, slots=True)
 class SessionDefaults:
-    """会话与持久化默认值。"""
+    """Session and persistence defaults."""
 
     max_resident: int = 20
     idle_timeout_s: int = 1_800
@@ -91,7 +95,7 @@ class SessionDefaults:
 
 @dataclass(frozen=True, slots=True)
 class RateDefaults:
-    """模型层限流与熔断默认值。"""
+    """Model-layer rate limiting and circuit-breaker defaults."""
 
     window_s: int = 60
     max_requests: int = 60
@@ -103,7 +107,7 @@ class RateDefaults:
 
 @dataclass(frozen=True, slots=True)
 class MemoryDefaults:
-    """记忆与轨迹默认值。"""
+    """Memory and trace defaults."""
 
     agent_dir: str = ".agent"
     work_memory: str = "WORK.md"
@@ -114,7 +118,7 @@ class MemoryDefaults:
     replace_backoff_s: float = 0.002
 
 
-#: 全局默认实例（只读）。
+#: Global default instances (read-only).
 DEFAULT_CONTEXT = ContextDefaults()
 DEFAULT_LOOP = LoopDefaults()
 DEFAULT_EXECUTION = ExecutionDefaults()
@@ -125,7 +129,7 @@ DEFAULT_MEMORY = MemoryDefaults()
 
 
 def as_dict() -> dict[str, dict[str, object]]:
-    """把全部默认值导出为嵌套字典（供文档生成与快照测试使用）。"""
+    """Export all defaults as a nested dict (for doc generation and snapshot tests)."""
     return {
         "context": asdict(DEFAULT_CONTEXT),
         "loop": asdict(DEFAULT_LOOP),

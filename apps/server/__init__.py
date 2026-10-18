@@ -1,7 +1,7 @@
-"""Harness Web 服务层（FastAPI）。
+"""Harness web service layer (FastAPI).
 
-与核心包 ``harness`` 的边界：
+Boundary with the core ``harness`` package:
 
-* ``harness``：零 Web 框架的编排内核；
-* ``apps.server``：把内核包装成 REST + SSE 服务。
+* ``harness``: the orchestration kernel with zero web-framework dependencies;
+* ``apps.server``: wraps the kernel as a REST + SSE service.
 """

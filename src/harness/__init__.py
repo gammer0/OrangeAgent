@@ -1,4 +1,4 @@
-"""Harness：可长期运行、工具能力可扩展的智能体平台。"""
+"""Harness: a long-running agent platform with extensible tool capabilities."""
 
 from __future__ import annotations
 

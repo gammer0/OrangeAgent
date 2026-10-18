@@ -1,23 +1,24 @@
-"""统一异常定义。
+"""Unified exception definitions.
 
-本模块只定义异常类型，不含处置逻辑（处置见 docs/01-系统架构设计.md §4.9）。
-消息不变量校验失败统一走 ``MessageInvariantError``，其 ``rule`` 字段对应
-docs/02-数据结构设计/03-消息.md 中的约束编号。
+This module defines exception types only; it contains no handling logic
+(see docs/01-architecture.md §4.9 for handling).
+Message invariant violations always go through ``MessageInvariantError``;
+its ``rule`` field maps to constraint identifiers in the message design doc.
 """
 
 from __future__ import annotations
 
 
 class HarnessError(Exception):
-    """所有 harness 异常的基类。"""
+    """Base class for all harness exceptions."""
 
 
 class MessageInvariantError(HarnessError):
-    """消息序列不变量被违反（A1–A14）。
+    """A message-sequence invariant was violated (A1-A14).
 
     Attributes:
-        rule: 约束编号，如 ``"A3"``。
-        detail: 人可读的违规描述。
+        rule: Constraint identifier, e.g. ``"A3"``.
+        detail: Human-readable violation description.
     """
 
     def __init__(self, rule: str, detail: str) -> None:
