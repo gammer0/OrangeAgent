@@ -563,7 +563,10 @@ class ReverseProxy:
         raise ModelError("all providers failed: " + "; ".join(errors), provider="proxy")
 
     def _candidates(self) -> list[ProviderConfig]:
-        """Provider order: healthy first, circuit-open later (still attempted so they can recover)."""
+        """Provider order: healthy first, circuit-open later.
+
+        Circuit-open providers are still attempted so they can recover.
+        """
         return sorted(
             self.providers,
             key=lambda p: 0 if self.health[p.name].state == "healthy" else 1,

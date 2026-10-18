@@ -14,8 +14,6 @@ The checks mirror the "physical requirements" in
 
 from __future__ import annotations
 
-import json
-import math
 import subprocess
 import sys
 from pathlib import Path
@@ -207,7 +205,9 @@ if os.path.isfile(core_path):
         if "pygame" in imported:
             report["problems"].append("core.py must not import pygame (the physics layer must run headless)")
 
-        classes = {n.name: n for n in ast.walk(tree) if isinstance(n, ast.ClassDef)}
+        classes = {
+            n.name: n for n in ast.walk(tree) if isinstance(n, ast.ClassDef)
+        }
         if "ParticleSystem" not in classes:
             report["problems"].append("core.py is missing class ParticleSystem")
         else:

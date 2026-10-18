@@ -381,5 +381,8 @@ def parse_call_arguments(call: ToolCall) -> dict[str, Any]:
 
 
 def type_name_for(expected: str) -> str:
-    """Convert a JSON Schema type name into a model-readable form (used for debugging and traces)."""
+    """Convert a JSON Schema type name into a model-readable form.
+
+    Used for debugging and traces.
+    """
     return "|".join(_TYPE_ALIASES.get(expected, (expected,)))

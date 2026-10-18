@@ -283,7 +283,10 @@ class HarnessService:
             self.store = None
 
     def _load_context(self) -> None:
-        """Assemble the context assembler (no summarizer injected; compression degrades losslessly per I4)."""
+        """Assemble the context assembler.
+
+        No summarizer is injected; compression degrades losslessly per I4.
+        """
         try:
             self.assembler = ContextAssembler(capacity=self.capacity)
         except Exception as exc:  # noqa: BLE001

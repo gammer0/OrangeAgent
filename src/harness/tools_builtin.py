@@ -26,8 +26,9 @@ import json
 import os
 import subprocess
 import sys
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from harness.permission import CapName, Permission
 from harness.tool_tree import ToolDef
@@ -499,8 +500,12 @@ raise SystemExit(0 if not errors else 5)
 '''
 
 
-def snake_demo(workdir: str, path: str = "snake_game", steps: int = 200, seed: int = 7) -> str:
-    """Headless self-check: advance frames with a fixed seed and verify the core logic does not crash.
+def snake_demo(
+    workdir: str, path: str = "snake_game", steps: int = 200, seed: int = 7
+) -> str:
+    """Headless self-check: advance frames with a fixed seed.
+
+    Verifies the core logic does not crash.
 
     The probe looks for ``SnakeGame`` / ``Game`` in places such as
     ``<path>/game.py`` and ``<package>.game``, so a project can use either a flat

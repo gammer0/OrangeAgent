@@ -481,7 +481,9 @@ def _to_row(
         return (session_id, seq, "assistant", msg.content, tool_calls, None, None, now)
     if isinstance(msg, ToolMsg):
         return (session_id, seq, "tool", msg.content, None, msg.tool_call_id, msg.name, now)
-    raise MessageInvariantError("A1", f"unsupported message type for persistence: {type(msg).__name__}")
+    raise MessageInvariantError(
+        "A1", f"unsupported message type for persistence: {type(msg).__name__}"
+    )
 
 
 def row_to_message(row: StoredMessage) -> Message:

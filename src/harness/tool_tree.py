@@ -240,7 +240,8 @@ class ToolDef:
             mutating = {"write", "exec"} & set(self.caps)
             if mutating:
                 raise ValueError(
-                    f"B12: caps={self.caps} contains {sorted(mutating)}, so idempotent=true is not allowed"
+                    f"B12: caps={self.caps} contains {sorted(mutating)}, "
+                    "so idempotent=true is not allowed"
                 )
 
     def with_retired(self, retired: bool = True) -> ToolDef:
@@ -264,7 +265,9 @@ class ToolDef:
         digest = hashlib.sha1(path.encode("utf-8")).hexdigest()[:12]
         head = path_head(path)
         if head not in RESOURCE_ROOTS:
-            raise ToolTreeError("B19", f"cannot synthesize an entry for {path!r}: invalid first segment")
+            raise ToolTreeError(
+                "B19", f"cannot synthesize an entry for {path!r}: invalid first segment"
+            )
         return cls(
             tool_id=f"t_tree_{digest}",
             path=path,
@@ -397,7 +400,11 @@ class _ReadOnlyMapping(Mapping[str, ToolDef]):
 
 
 def _check_description(description: str, path: str) -> None:
-    """B9 single-line plus B10 length (over-long is truncated during assembly; only newlines are rejected here)."""
+    """B9 single-line plus B10 length.
+
+    Over-long descriptions are truncated during assembly; only newlines are
+    rejected here.
+    """
     del path
     _reject_multiline(description)
 
@@ -438,7 +445,10 @@ class ToolNode:
         self.children.append(node)
 
     def sort_children(self) -> None:
-        """Re-sort the whole subtree by ``path`` lexicographically (B6 requires an ordered index)."""
+        """Re-sort the whole subtree by ``path`` lexicographically.
+
+        B6 requires an ordered index.
+        """
         self.children.sort(key=lambda n: n.path)
         for node in self.children:
             node.sort_children()
@@ -861,7 +871,9 @@ def _synthesize_prefixes(
     *,
     existing_paths: Iterable[str] = (),
 ) -> dict[str, ToolDef]:
-    """Synthesize a ``ToolDef`` for intermediate nodes with no explicit entry (B20); returns path -> entry.
+    """Synthesize a ``ToolDef`` for intermediate nodes with no explicit entry (B20).
+
+    Returns path -> entry.
 
     Synthesized entries inherit ``permission`` / ``side_effect_scope`` from their
     parent (B17); an L1 node with no parent entry uses the resource-root default.

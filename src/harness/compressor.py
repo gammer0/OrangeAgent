@@ -304,7 +304,9 @@ def compress(
     if kept_records:
         first_kept = kept_records[0].messages[0]
         if not isinstance(first_kept, AssistantMsg):  # pragma: no cover - split guarantees this
-            raise ValueError("C3: the kept segment must start with a complete CallRecord (AssistantMsg)")
+            raise ValueError(
+                "C3: the kept segment must start with a complete CallRecord (AssistantMsg)"
+            )
 
     prior_index, prior_summary = _find_previous_summary(split.head)
     older = [m for i, m in enumerate(split.head) if i != prior_index]

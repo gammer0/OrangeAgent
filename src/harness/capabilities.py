@@ -35,9 +35,10 @@ import importlib.util
 import inspect
 import json
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from harness.permission import Permission
 from harness.tool_tree import ToolDef, ToolTreeError, _reject_multiline
@@ -95,7 +96,9 @@ RESOURCE_ROOTS: tuple[str, ...] = ("tool", "skill", "mcp")
 
 
 def normalize_group(group: str) -> str:
-    """Normalize a group identifier: ``/tool/os`` and ``tool/os`` are equivalent, both become the latter.
+    """Normalize a group identifier.
+
+    ``/tool/os`` and ``tool/os`` are equivalent, both become the latter.
 
     Raises:
         CapabilityError: The identifier is invalid (empty, first segment not a
@@ -441,7 +444,10 @@ class CapabilityManifest:
     # ---------------------------------------------------------- serialization
 
     def to_dict(self) -> dict[str, Any]:
-        """Export as a JSON-friendly structure (tools record path and description only, never functions)."""
+        """Export as a JSON-friendly structure.
+
+        Tools record path and description only, never functions.
+        """
         tools = []
         for tool in sorted(self.tools, key=lambda x: x.path):
             entry: dict[str, Any] = {
@@ -607,7 +613,10 @@ def load_manifest(
 
 
 def _apply_entry_overrides(tool: ToolDef, entry: dict[str, Any]) -> ToolDef:
-    """Override factory metadata with explicit manifest declarations (``ToolDef`` is immutable; returns a new object)."""
+    """Override factory metadata with explicit manifest declarations.
+
+    ``ToolDef`` is immutable, so a new object is returned.
+    """
     changes: dict[str, Any] = {}
     description = entry.get("description")
     if description:

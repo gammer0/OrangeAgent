@@ -188,7 +188,10 @@ class StepController:
 
     @property
     def stop_reason(self) -> str | None:
-        """Stop reason for this session: ``max_steps`` / ``max_injects`` / ``deadlock`` / ``None``."""
+        """Stop reason for this session.
+
+        One of ``max_steps`` / ``max_injects`` / ``deadlock`` / ``None``.
+        """
         return self._stop_reason
 
     @property
@@ -511,7 +514,10 @@ class AgentLoop:
         plan: BatchPlan,
         signal: InterruptRequest,
     ) -> None:
-        """G1 / D7: fill ``3e`` placeholders; G3: insert a ``UserMsg`` when ``text`` is non-empty."""
+        """G1 / D7: fill ``3e`` placeholders.
+
+        G3: insert a ``UserMsg`` when ``text`` is non-empty.
+        """
         filled = {
             msg.tool_call_id
             for msg in messages
@@ -552,7 +558,9 @@ class AgentLoop:
         """
         if _has_unclosed_tool_calls(messages):
             raise MessageInvariantError(
-                "I6", f"{channel} channel messages must not be inserted into an unclosed tool_calls sequence"
+                "I6",
+                f"{channel} channel messages must not be inserted into an "
+                "unclosed tool_calls sequence",
             )
 
         msg = UserMsg(content=text)

@@ -356,7 +356,7 @@ def extraction_transition(
 
 
 class MemoryExtraction(BaseModel):
-    """A settlement-extraction task (a background task the user triggers explicitly; never blocks the loop, C5).
+    """A settlement-extraction task: an explicit background task that never blocks the loop (C5).
 
     State machine: ``pending -> running -> done | failed``; ``done`` and
     ``failed`` are terminal and cannot transition further.

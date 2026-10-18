@@ -173,7 +173,10 @@ class BatchPlan(BaseModel):
         return len(self.results) == len(self.calls)
 
     def ordered_results(self) -> list[tuple[ToolCall, ExecResult]]:
-        """Return (call, result) in group order then intra-group order, not completion order (D3)."""
+        """Return (call, result) in group order then intra-group order (D3).
+
+        Never in completion order.
+        """
         ordered: list[tuple[ToolCall, ExecResult]] = []
         for group in self.groups:
             for call in group.calls:

@@ -123,7 +123,9 @@ def save_permissions(
     raw = _read_raw(workdir)
     agents = raw.setdefault("agents", {})
     agents[permissions.agent_id] = {
-        "grants": {path: False for path in sorted(permissions.grants) if not permissions.grants[path]}
+        "grants": {
+            path: False for path in sorted(permissions.grants) if not permissions.grants[path]
+        }
     }
     raw["version"] = PERMISSION_VERSION
 

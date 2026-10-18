@@ -262,7 +262,7 @@ class TreeSessionState:
         *,
         depth: int | None = None,
     ) -> dict[str, Any]:
-        """Query children, decide and write ``delivered``, upsert the inventory -- **one lock** (B14).
+        """Query children, write ``delivered`` and upsert the inventory -- **one lock** (B14).
 
         Args:
             tree: Owning tool tree (the permission filter is re-applied inside

@@ -195,7 +195,10 @@ class Session:
         self.last_activity = time.time()
 
     def busy(self) -> None:
-        """Mark the session as reasoning: ``active`` sessions are never unloaded by ``sweep`` (H10)."""
+        """Mark the session as reasoning.
+
+        ``active`` sessions are never unloaded by ``sweep`` (H10).
+        """
         self.status = "active"
         self.touch()
 
@@ -308,7 +311,10 @@ class SessionRegistry:
     # ------------------------------------------------------------------
 
     def _evictable(self, session: Session, now: float) -> bool:
-        """Whether the session can be unloaded: inactive (``idle``) and no pending messages (H10)."""
+        """Whether the session can be unloaded.
+
+        Evictable means inactive (``idle``) with no pending messages (H10).
+        """
         return session.status == "idle" and session.inbox.is_empty()
 
     def sweep(self, now: float | None = None) -> list[str]:
@@ -380,7 +386,9 @@ class SessionRegistry:
     # ------------------------------------------------------------------
 
     def start_sweeper(self) -> None:
-        """Start the background sweeper thread, calling ``sweep()`` every ``policy.sweep_interval_s``.
+        """Start the background sweeper thread.
+
+        Calls ``sweep()`` every ``policy.sweep_interval_s``.
 
         Idempotent: returns immediately when already running. The thread is a
         daemon so it never blocks process exit; ``stop_sweeper()`` wakes and ends
