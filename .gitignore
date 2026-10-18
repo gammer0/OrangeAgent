@@ -51,3 +51,7 @@ runs/
 *.db
 *.sqlite
 *.sqlite3
+
+# pytest temp
+.pytest-tmp/
+.pytest_tmp/
