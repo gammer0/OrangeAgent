@@ -1,0 +1,118 @@
+{
+  "version": 1,
+  "notes": [],
+  "tools": [
+    {
+      "path": "/mcp/fs/list",
+      "description": "MCP filesystem：列出目录（URI 语义）",
+      "caps": [
+        "read"
+      ],
+      "idempotent": true
+    },
+    {
+      "path": "/mcp/fs/read",
+      "description": "MCP filesystem：读取文本文件",
+      "caps": [
+        "read"
+      ],
+      "idempotent": true
+    },
+    {
+      "path": "/mcp/fs/write",
+      "description": "MCP filesystem：写入文本文件",
+      "caps": [
+        "write"
+      ],
+      "idempotent": false
+    },
+    {
+      "path": "/tool/code/py/check",
+      "description": "Python 语法检查，返回错误行号",
+      "caps": [
+        "read"
+      ],
+      "idempotent": true
+    },
+    {
+      "path": "/tool/code/py/run_brief",
+      "description": "短时运行脚本并返回输出（带超时）",
+      "caps": [
+        "exec"
+      ],
+      "idempotent": false
+    },
+    {
+      "path": "/tool/game/snake/check",
+      "description": "贪吃蛇验收：结构/语法/常见缺陷",
+      "caps": [
+        "read"
+      ],
+      "idempotent": true
+    },
+    {
+      "path": "/tool/game/snake/demo",
+      "description": "贪吃蛇无头自检：固定种子跑若干步",
+      "caps": [
+        "exec"
+      ],
+      "idempotent": false
+    },
+    {
+      "path": "/tool/os/file/append",
+      "description": "追加写入文件",
+      "caps": [
+        "write"
+      ],
+      "idempotent": false
+    },
+    {
+      "path": "/tool/os/file/list",
+      "description": "列出目录条目（文件/目录+大小）",
+      "caps": [
+        "read"
+      ],
+      "idempotent": true
+    },
+    {
+      "path": "/tool/os/file/read",
+      "description": "按行读取工作目录内文本文件",
+      "caps": [
+        "read"
+      ],
+      "idempotent": true
+    },
+    {
+      "path": "/tool/os/file/write",
+      "description": "整体写入文件（覆盖），自动建目录",
+      "caps": [
+        "write"
+      ],
+      "idempotent": false
+    },
+    {
+      "path": "/tool/os/shell/run",
+      "description": "在子进程中执行一条命令（带超时）",
+      "caps": [
+        "exec"
+      ],
+      "idempotent": false
+    }
+  ],
+  "skills": [
+    {
+      "name": "incremental-delivery",
+      "description": "小步交付并每步验证：先骨架后功能、每次只改一处、改完立即自检、失败先读错误再动手。用于多文件工程任务。",
+      "source": ".agent/skills/incremental-delivery/SKILL.md",
+      "dir": ".agent/skills/incremental-delivery",
+      "extra_files": []
+    },
+    {
+      "name": "snake-game-python",
+      "description": "用 Python 从零实现可在终端运行的贪吃蛇游戏：固定时间步、无头自检、分层结构。用于编写或验收 snake_game 项目。",
+      "source": ".agent/skills/snake-game-python/SKILL.md",
+      "dir": ".agent/skills/snake-game-python",
+      "extra_files": []
+    }
+  ]
+}

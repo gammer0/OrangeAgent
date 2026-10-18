@@ -23,9 +23,21 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from harness.capabilities import (
+    BUILTIN_SKILLS,
+    BUILTIN_TOOL_PATHS,
+    CapabilityError,
+    CapabilityManifest,
+    SkillDef,
+    build_builtin_tool,
+    load_manifest,
+    save_manifest,
+    write_skill_files,
+)
 from harness.config import ConfigError, load_llm_config
 from harness.defaults import as_dict as defaults_as_dict
 from harness.service import ServiceStatus, build_service
+from harness.tools_builtin import TOOL_SPECS
 
 __all__ = ["main", "build_parser"]
 
@@ -409,6 +421,314 @@ def _cmd_config_init(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
+# tools / skills 子命令
+# ---------------------------------------------------------------------------
+
+
+#: 预设分组：``harness tools add --preset <名>``。
+TOOL_PRESETS: dict[str, tuple[str, ...]] = {
+    "core": ("/tool/os/file/read", "/tool/os/file/list", "/tool/os/file/write", "/tool/os/echo"),
+    "coding": (
+        "/tool/os/file/read",
+        "/tool/os/file/list",
+        "/tool/os/file/write",
+        "/tool/os/file/append",
+        "/tool/code/py/check",
+        "/tool/code/py/run_brief",
+        "/tool/os/shell/run",
+    ),
+    "game": (
+        "/tool/game/snake/check",
+        "/tool/game/snake/demo",
+        "/tool/code/py/check",
+        "/tool/code/py/run_brief",
+    ),
+    "mcp-filesystem": ("/mcp/fs/list", "/mcp/fs/read", "/mcp/fs/write"),
+    "all": tuple(BUILTIN_TOOL_PATHS),
+}
+
+#: 预设名称 → 说明（保持与 ``TOOL_PRESETS`` 同步）。
+PRESET_HINTS: dict[str, str] = {
+    "core": "最小文件读写（4 个）",
+    "coding": "编码闭环：读写 + 语法检查 + 短运行 + shell",
+    "game": "游戏验收：结构检查 + 无头自推演（依赖 coding 的 py 工具）",
+    "mcp-filesystem": "MCP filesystem 命名空间（3 个）",
+    "all": "全部内置工具",
+}
+
+
+def _load_or_empty(workdir: str) -> CapabilityManifest:
+    """读取清单；不存在时返回空清单（供 ``add`` 首次使用）。"""
+    try:
+        return load_manifest(workdir)
+    except CapabilityError as exc:
+        if "不存在" in str(exc):
+            return CapabilityManifest()
+        raise
+
+
+def _save_and_report(manifest: CapabilityManifest, workdir: str, *, as_json: bool) -> None:
+    """保存清单并输出摘要。"""
+    target = save_manifest(manifest, workdir)
+    if as_json:
+        _print_json({**manifest.to_dict(), "file": str(target)})
+        return
+    print(f"已写入: {target}")
+    print(f"工具 {len(manifest.tools)} 个，skill {len(manifest.skills)} 个")
+
+
+def _print_capabilities(manifest: CapabilityManifest, *, as_json: bool) -> None:
+    """打印当前清单。"""
+    if as_json:
+        _print_json(manifest.to_dict())
+        return
+    if not manifest.tools and not manifest.skills:
+        print("（空清单）使用 `harness tools add --preset all` 装载工具")
+        return
+    if manifest.tools:
+        print(f"[工具] {len(manifest.tools)} 个")
+        for tool in sorted(manifest.tools, key=lambda t: t.path):
+            marks = f"caps={','.join(tool.caps) or '-'} {tool.concurrency}"
+            if tool.idempotent:
+                marks += " idem"
+            print(f"  {tool.path:<28} {marks:<28} {tool.description}")
+    if manifest.skills:
+        print(f"[skill] {len(manifest.skills)} 个")
+        for skill in sorted(manifest.skills, key=lambda s: s.name):
+            print(f"  {skill.path:<28} source={skill.source:<24} {skill.description}")
+
+
+def _cmd_tools_list(args: argparse.Namespace) -> int:
+    """``harness tools list``：列出已装载与可用工具。"""
+    manifest = _load_or_empty(args.workdir)
+    if args.available:
+        payload = {
+            "available": [
+                {
+                    "path": spec["path"],
+                    "description": spec["description"],
+                    "caps": list(spec["caps"]),
+                }
+                for _, spec in sorted(TOOL_SPECS.items())
+            ],
+            "presets": {name: list(paths) for name, paths in TOOL_PRESETS.items()},
+        }
+        if args.json:
+            _print_json(payload)
+            return 0
+        print("[可用内置工具]")
+        for item in payload["available"]:
+            loaded = " *" if manifest.has_path(item["path"]) else ""
+            print(f"  {item['path']:<28} {item['description']}{loaded}")
+        print("\n[预设]")
+        for name, paths in TOOL_PRESETS.items():
+            print(f"  {name:<16} {PRESET_HINTS.get(name, '')} ({len(paths)} 个)")
+        print("\n（* 表示已装载）")
+        return 0
+
+    _print_capabilities(manifest, as_json=args.json)
+    return 0
+
+
+def _cmd_tools_add(args: argparse.Namespace) -> int:
+    """``harness tools add``：按路径或预设追加工具。"""
+    paths: list[str] = []
+    for group in args.preset or []:
+        if group not in TOOL_PRESETS:
+            print(
+                f"未知预设: {group}（可用: {', '.join(sorted(TOOL_PRESETS))}）",
+                file=sys.stderr,
+            )
+            return 2
+        paths.extend(TOOL_PRESETS[group])
+    paths.extend(args.paths or [])
+    if not paths:
+        print("至少给出一个路径或 --preset", file=sys.stderr)
+        return 2
+
+    manifest = _load_or_empty(args.workdir)
+    added, skipped = [], []
+    for path in dict.fromkeys(paths):
+        if path not in TOOL_SPECS:
+            print(f"未知工具路径: {path}", file=sys.stderr)
+            return 2
+        if manifest.has_path(path):
+            skipped.append(path)
+            continue
+        manifest.add_tool(build_builtin_tool(path, args.workdir))
+        added.append(path)
+
+    if added:
+        _save_and_report(manifest, args.workdir, as_json=args.json)
+    elif args.json:
+        _print_json({"added": [], "skipped": skipped})
+    if skipped and not args.json:
+        print(f"已存在，跳过 {len(skipped)} 个: {', '.join(skipped)}")
+    if not added and not skipped and not args.json:
+        print("没有变化")
+    return 0
+
+
+def _cmd_tools_remove(args: argparse.Namespace) -> int:
+    """``harness tools remove``：按路径移除工具。"""
+    manifest = _load_or_empty(args.workdir)
+    removed = [path for path in args.paths if manifest.remove(path)]
+    if not removed:
+        print("没有匹配的条目", file=sys.stderr)
+        return 1
+    _save_and_report(manifest, args.workdir, as_json=args.json)
+    return 0
+
+
+def _cmd_skills_list(args: argparse.Namespace) -> int:
+    """``harness skills list``：列出已装载 skill 及目录状态。"""
+    manifest = _load_or_empty(args.workdir)
+    rows = []
+    for skill in sorted(manifest.skills, key=lambda s: s.name):
+        target = Path(args.workdir).resolve() / skill.skill_md
+        rows.append(
+            {
+                "name": skill.name,
+                "path": skill.path,
+                "source": skill.source,
+                "dir": skill.dir,
+                "skill_md": target.is_file(),
+                "description": skill.description,
+            }
+        )
+    if args.json:
+        _print_json({"skills": rows})
+        return 0
+    if not rows:
+        print("（没有 skill）使用 `harness skills add <来源> --name <名>` 装载")
+        return 0
+    for row in rows:
+        flag = "OK" if row["skill_md"] else "MISSING SKILL.md"
+        print(f"{row['path']:<28} {flag:<18} source={row['source']}")
+        print(f"  {row['description']}")
+    return 0
+
+
+def _cmd_skills_add(args: argparse.Namespace) -> int:
+    """``harness skills add``：从内置模板 / 本地文件 / URL 装载 skill。"""
+    workdir = args.workdir
+    files: dict[str, str] = {}
+    source = args.source
+
+    if source.startswith(("http://", "https://")):
+        text, files = _fetch_skill_source(source)
+    elif source in BUILTIN_SKILLS:
+        text = BUILTIN_SKILLS[source][0]
+    else:
+        local = Path(source)
+        if not local.is_file():
+            print(f"找不到来源: {source}", file=sys.stderr)
+            print(
+                f"可用内置模板: {', '.join(sorted(BUILTIN_SKILLS)) or '（无）'}",
+                file=sys.stderr,
+            )
+            return 2
+        text = local.read_text(encoding="utf-8", errors="replace")
+
+    description = args.description or _frontmatter_value(text, "description") or ""
+    if not description:
+        print("无法确定 description：用 --description 显式给出", file=sys.stderr)
+        return 2
+    name = args.name or _frontmatter_value(text, "name") or ""
+    if not name:
+        print("无法确定 skill 名：用 --name 显式给出", file=sys.stderr)
+        return 2
+
+    manifest = _load_or_empty(workdir)
+    skill = SkillDef(name=name, description=description, source=source)
+    reload = args.force
+    if manifest.get_skill(name):
+        if not reload:
+            print(f"skill 已存在: {name}（使用 --force 覆盖内容）", file=sys.stderr)
+            return 2
+        manifest.skills = [s for s in manifest.skills if s.name != name]
+    manifest.add_skill(skill)
+
+    payload = {"SKILL.md": _strip_to_skill(text)}
+    for filename, content in files.items():
+        payload[filename] = content
+    target = write_skill_files(workdir, name, payload)
+    _save_and_report(manifest, workdir, as_json=args.json)
+    if not args.json:
+        print(f"skill 文件: {target / 'SKILL.md'}")
+    return 0
+
+
+def _cmd_skills_remove(args: argparse.Namespace) -> int:
+    """``harness skills remove``：从清单摘除 skill（不删目录）。"""
+    manifest = _load_or_empty(args.workdir)
+    if not manifest.remove(f"/skill/{args.name}"):
+        print(f"没有该 skill: {args.name}", file=sys.stderr)
+        return 1
+    _save_and_report(manifest, args.workdir, as_json=args.json)
+    return 0
+
+
+def _cmd_skills_show(args: argparse.Namespace) -> int:
+    """``harness skills show``：打印 skill 文件内容。"""
+    manifest = _load_or_empty(args.workdir)
+    skill = manifest.get_skill(args.name)
+    if skill is None:
+        print(f"没有该 skill: {args.name}", file=sys.stderr)
+        return 1
+    target = Path(args.workdir).resolve() / skill.dir / args.file
+    if not target.is_file():
+        print(f"文件不存在: {target}", file=sys.stderr)
+        return 1
+    print(target.read_text(encoding="utf-8", errors="replace"))
+    return 0
+
+
+def _frontmatter_value(text: str, key: str) -> str:
+    """从 ``SKILL.md`` 的 YAML frontmatter 读取单个标量值。"""
+    if not text.startswith("---"):
+        return ""
+    end = text.find("\n---", 3)
+    block = text[3:end] if end != -1 else text[3:]
+    for line in block.splitlines():
+        if ":" not in line:
+            continue
+        name, _, value = line.partition(":")
+        if name.strip() == key:
+            return value.strip().strip("\"'")
+    return ""
+
+
+def _strip_to_skill(text: str) -> str:
+    """保证落盘内容以 frontmatter 开头（去 BOM / 前导空行）。"""
+    return text.lstrip("\ufeff").lstrip()
+
+
+def _fetch_skill_source(url: str) -> tuple[str, dict[str, str]]:
+    """下载 skill 来源；``*.md`` 单文件，其余视作 zip 包（仅取顶层 md）。"""
+    import io
+    import urllib.request
+    import zipfile
+
+    with urllib.request.urlopen(url, timeout=30) as response:  # noqa: S310 - 用户显式给出的 URL
+        raw = response.read()
+
+    if not url.lower().endswith(".zip"):
+        return raw.decode("utf-8", errors="replace"), {}
+
+    files: dict[str, str] = {}
+    with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+        for info in archive.infolist():
+            name = Path(info.filename).name
+            if not name.endswith(".md"):
+                continue
+            with archive.open(info) as handle:
+                files[name] = handle.read().decode("utf-8", errors="replace")
+    skill_md = files.pop("SKILL.md", "")
+    return skill_md, files
+
+
+# ---------------------------------------------------------------------------
 # 解析器
 # ---------------------------------------------------------------------------
 
@@ -506,6 +826,60 @@ def build_parser() -> argparse.ArgumentParser:
     init.add_argument("--output", default=".env.example", help="输出文件名")
     init.add_argument("--force", action="store_true", help="覆盖已存在文件")
     init.set_defaults(func=_cmd_config_init)
+
+    # ---- tools ----
+    tools = sub.add_parser("tools", help="工具装载与查看")
+    _add_common_options(tools)
+    tools_sub = tools.add_subparsers(dest="action", required=True)
+
+    tools_list = tools_sub.add_parser("list", help="列出已装载工具")
+    _add_common_options(tools_list)
+    tools_list.add_argument("--available", action="store_true", help="同时列出可用与预设")
+    tools_list.set_defaults(func=_cmd_tools_list)
+
+    tools_add = tools_sub.add_parser("add", help="按路径或预设追加工具")
+    _add_common_options(tools_add)
+    tools_add.add_argument("paths", nargs="*", help="工具路径，如 /tool/code/py/check")
+    tools_add.add_argument(
+        "--preset",
+        action="append",
+        choices=sorted(TOOL_PRESETS),
+        help="按预设批量装载（可重复）",
+    )
+    tools_add.set_defaults(func=_cmd_tools_add)
+
+    tools_remove = tools_sub.add_parser("remove", help="按路径移除工具")
+    _add_common_options(tools_remove)
+    tools_remove.add_argument("paths", nargs="+", help="工具路径")
+    tools_remove.set_defaults(func=_cmd_tools_remove)
+
+    # ---- skills ----
+    skills = sub.add_parser("skills", help="skill 装载与查看")
+    _add_common_options(skills)
+    skills_sub = skills.add_subparsers(dest="action", required=True)
+
+    skills_list = skills_sub.add_parser("list", help="列出已装载 skill")
+    _add_common_options(skills_list)
+    skills_list.set_defaults(func=_cmd_skills_list)
+
+    skills_add = skills_sub.add_parser("add", help="从内置模板/文件/URL 装载 skill")
+    _add_common_options(skills_add)
+    skills_add.add_argument("source", help="内置模板名 / SKILL.md 路径 / http(s) URL")
+    skills_add.add_argument("--name", default=None, help="skill 名，默认取 frontmatter")
+    skills_add.add_argument("--description", default=None, help="覆盖 frontmatter 描述")
+    skills_add.add_argument("--force", action="store_true", help="已存在时覆盖内容")
+    skills_add.set_defaults(func=_cmd_skills_add)
+
+    skills_remove = skills_sub.add_parser("remove", help="从清单摘除 skill")
+    _add_common_options(skills_remove)
+    skills_remove.add_argument("name", help="skill 名")
+    skills_remove.set_defaults(func=_cmd_skills_remove)
+
+    skills_show = skills_sub.add_parser("show", help="打印 skill 文件内容")
+    _add_common_options(skills_show)
+    skills_show.add_argument("name", help="skill 名")
+    skills_show.add_argument("--file", default="SKILL.md", help="相对文件名")
+    skills_show.set_defaults(func=_cmd_skills_show)
 
     return parser
 
