@@ -19,7 +19,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 
-from harness.args_validate import parse_call_arguments
+from harness.args_validate import validate_arguments
 from harness.execution import BatchPlan, ExecGroup, ExecResult, error_content
 from harness.message import ToolCall
 from harness.truncate import DEFAULT_MAX_CHARS, truncate_result
@@ -44,11 +44,13 @@ class ExecToolDef(Protocol):
         fn: 工具实现，签名 ``fn(**kwargs) -> Any``。
         concurrency: ``"safe"`` / ``"exclusive"``；不是 ``"safe"`` 一律按 ``exclusive``。
         idempotent: 是否幂等；**唯一**决定 ``ExecResult.retryable``（§4.13）。
+        schema: 参数 JSON Schema；缺省或空对象等价于「无约束」。
     """
 
     fn: Callable[..., Any]
     concurrency: str
     idempotent: bool
+    schema: dict[str, Any]
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,12 +115,34 @@ def _run_one(
     resolver: Callable[[ToolCall], ExecToolDef],
     max_chars: int = DEFAULT_MAX_CHARS,
 ) -> ExecResult:
-    """执行单个调用；任何异常都收敛为 ``3c``（§4.6 Executor 职责）。"""
+    """执行单个调用：先校验参数（①–③ 关），再调用实现（④ 关）。
+
+    参数校验在进 ``fn`` **之前**完成，这很关键：
+
+    * 参数错误归 ``3d``（模型可自我修正），而不是执行异常 ``3c``；
+    * ``3d`` 的 content 是结构化 JSON（``stage`` + ``errors[]``），模型能
+      直接看出哪个字段缺了、类型错了；``3c`` 的 traceback 对模型是噪音。
+    * 缺必填字段/类型错不得静默传给 ``fn``——否则工具内部若有默认行为，
+      会产出看似成功但语义错误的结果。
+
+    ``3d`` 不重试（J4）；只有真正进入 ``fn`` 后的异常才归 ``3c``。
+    """
     started = time.perf_counter()
     tool: ExecToolDef | None = None
     try:
         tool = resolver(call)
-        value = tool.fn(**parse_call_arguments(call))
+
+        # ①–③ 关：JSON 解析 → schema 校验 → 类型转换与缺省填充
+        validation, failure = validate_arguments(
+            call.arguments, getattr(tool, "schema", {}) or {}
+        )
+        if failure is not None:
+            elapsed = int((time.perf_counter() - started) * 1000)
+            return failure.model_copy(update={"duration_ms": elapsed})
+        assert validation is not None  # 与 failure 互斥
+
+        # ④ 关：调用实现
+        value = tool.fn(**validation.params)
         elapsed = int((time.perf_counter() - started) * 1000)
         return ExecResult(
             ok=True,

@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import pytest
@@ -30,6 +30,7 @@ class FakeToolDef:
     fn: Any
     concurrency: str = "safe"
     idempotent: bool = False
+    schema: dict[str, Any] = field(default_factory=dict)
 
 
 def _call(call_id: str, name: str = SAFE, arguments: str = "{}") -> ToolCall:
@@ -226,13 +227,133 @@ class TestExecuteBatch:
         execute_batch(plan, _resolver(tools))
         assert seen == {"path": "a.txt", "offset": 3}
 
-    def test_invalid_arguments_json_becomes_3c(self) -> None:
-        """执行器的轻量路径：非法 JSON 由执行器收敛为 3c（编排层应先走 3d）。"""
+    def test_invalid_arguments_json_becomes_3d(self) -> None:
+        """非法 JSON 由执行器在校验关拦截，归 3d（模型可自我修正）。
+
+        历史：曾经只做 JSON 解析不做 schema 校验，参数错误一律变成 3c
+        （执行异常），模型拿到的是一段 traceback，无法据此改参数。
+        """
         tools = {SAFE: FakeToolDef(fn=lambda **_: "ok")}
         plan = plan_batch([_call("c1", SAFE, "{bad}")], lambda c: "safe")
         result = execute_batch(plan, _resolver(tools))["c1"]
         assert result.ok is False
-        assert result.error_type == "3c"
+        assert result.error_type == "3d"
+        assert result.retryable is False  # J4：3d 不自动重试
+
+    def test_missing_required_field_becomes_3d(self) -> None:
+        """缺必填字段必须被拦截，不能静默传给 fn。"""
+        called: list[dict] = []
+
+        def fn(**kwargs) -> str:  # noqa: ANN003 - 记录实际收到的参数
+            called.append(kwargs)
+            return "should-not-run"
+
+        tools = {
+            SAFE: FakeToolDef(
+                fn=fn,
+                schema={
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}},
+                    "required": ["path"],
+                },
+            )
+        }
+        plan = plan_batch([_call("c1", SAFE, '{"limit": 5}')], lambda c: "safe")
+        result = execute_batch(plan, _resolver(tools))["c1"]
+        assert result.ok is False
+        assert result.error_type == "3d"
+        assert called == [], "参数不合法时不应调用 fn"
+        assert "missing" in result.content
+
+    def test_wrong_type_becomes_3d(self) -> None:
+        """类型不符必须被拦截。"""
+        tools = {
+            SAFE: FakeToolDef(
+                fn=lambda **_: "ok",
+                schema={
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}},
+                    "required": ["path"],
+                },
+            )
+        }
+        plan = plan_batch([_call("c1", SAFE, '{"path": 123}')], lambda c: "safe")
+        result = execute_batch(plan, _resolver(tools))["c1"]
+        assert result.ok is False
+        assert result.error_type == "3d"
+        assert "type" in result.content
+
+    def test_coercible_literal_is_accepted(self) -> None:
+        """字符串字面量 '"5"' 应被转换为 5，不算错误。"""
+        seen: dict = {}
+
+        def fn(**kwargs) -> str:  # noqa: ANN003
+            seen.update(kwargs)
+            return "ok"
+
+        tools = {
+            SAFE: FakeToolDef(
+                fn=fn,
+                schema={
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}, "limit": {"type": "integer"}},
+                    "required": ["path"],
+                },
+            )
+        }
+        plan = plan_batch([_call("c1", SAFE, '{"path": "a", "limit": "5"}')], lambda c: "safe")
+        result = execute_batch(plan, _resolver(tools))["c1"]
+        assert result.ok is True
+        assert seen["limit"] == 5
+
+    def test_extra_fields_ignored(self) -> None:
+        """多余字段忽略，不报错，也不传给 fn。"""
+        seen: dict = {}
+
+        def fn(**kwargs) -> str:  # noqa: ANN003
+            seen.update(kwargs)
+            return "ok"
+
+        tools = {
+            SAFE: FakeToolDef(
+                fn=fn,
+                schema={
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}},
+                    "required": ["path"],
+                },
+            )
+        }
+        plan = plan_batch([_call("c1", SAFE, '{"path": "a", "bogus": 1}')], lambda c: "safe")
+        result = execute_batch(plan, _resolver(tools))["c1"]
+        assert result.ok is True
+        assert seen == {"path": "a"}
+
+    def test_default_filled(self) -> None:
+        """schema 有 default 时自动补齐。"""
+        seen: dict = {}
+
+        def fn(**kwargs) -> str:  # noqa: ANN003
+            seen.update(kwargs)
+            return "ok"
+
+        tools = {
+            SAFE: FakeToolDef(
+                fn=fn,
+                schema={
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string"},
+                        "limit": {"type": "integer", "default": 100},
+                    },
+                    "required": ["path"],
+                },
+            )
+        }
+        plan = plan_batch([_call("c1", SAFE, '{"path": "a"}')], lambda c: "safe")
+        result = execute_batch(plan, _resolver(tools))["c1"]
+        assert result.ok is True
+        assert seen["limit"] == 100
 
     def test_duration_ms_is_non_negative(self) -> None:
         tools = {SAFE: FakeToolDef(fn=lambda **_: "ok")}
