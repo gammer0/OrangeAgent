@@ -1,21 +1,25 @@
-"""编排层：ReAct 状态机与步数闸门。
+"""Orchestration layer: the ReAct state machine and step gating.
 
-对应文档：docs/01-系统架构设计.md §4.2、§4.6.1、§4.9
+See docs/01-architecture.md §4.2, §4.6.1, §4.9.
 
-本模块只负责**控制流**，不执行工具、不直接构造 ``messages``：
+This module owns **control flow only**; it executes no tools and does not build
+``messages`` directly:
 
-* :class:`StepController` —— 步数闸门、注入计数、终止判定（含死锁判据）。
-* :class:`AgentLoop` —— 把「LLM 调用 → 工具批次 → 安全点插话 → 下一步」串起来，
-  依赖全部通过构造参数注入，便于用假对象做单元测试。
+* :class:`StepController` -- step gating, injection counting, termination
+  decisions (including the deadlock criterion).
+* :class:`AgentLoop` -- wires "LLM call -> tool batch -> safe-point injection ->
+  next step" together. Every dependency is injected through constructor
+  arguments, so unit tests can use fakes.
 
-安全点语义（G1–G4 / D7 / D8）：
+Safe-point semantics (G1-G4 / D7 / D8):
 
 ========================  =================  ====================
-安全点                       chat                control
+Safe point                chat               control
 ========================  =================  ====================
-① LLM 返回后                全部 drain          取首个并清空
-② 组间（仍有后续组）         **不动**            取首个并清空 → 停剩余组 + 补 3e
-③ 全批完成                  全部 drain          取首个并清空
+① after the LLM returns    drain all          take first, clear rest
+② between groups           **untouched**      take first, clear rest
+  (more groups remain)                       -> stop remaining + fill 3e
+③ whole batch done         drain all          take first, clear rest
 ========================  =================  ====================
 """
 
@@ -52,36 +56,39 @@ __all__ = [
 ]
 
 
-#: 设计文档配置项 ``MAX_STEPS``。
-#: ponytail: 20 不够用——实测多步工程任务（改代码 + 跑测试 + 修错）常在收尾前耗尽。
+#: Design-doc config item ``MAX_STEPS``.
+#: Note: 20 is not enough -- we measured multi-step engineering tasks (edit code
+#: + run tests + fix errors) frequently exhausting the budget before wrapping up.
 MAX_STEPS = 40
-#: 设计文档配置项 ``MAX_INJECTS``。
+#: Design-doc config item ``MAX_INJECTS``.
 MAX_INJECTS = 10
-#: 连续失败次数达到该值且未换工具路径即判定死锁（文档 §4.9）。
+#: Consecutive failures reaching this value without changing tool path counts as a
+#: deadlock (design doc §4.9).
 DEADLOCK_THRESHOLD = 3
-#: 连续空回复（无文本、无工具调用）达到该次数即中止。
-#: ponytail: 空回复既不能当最终答案（静默截断任务），也不能继续空转。
+#: Consecutive empty replies (no text, no tool calls) reaching this count aborts.
+#: Note: an empty reply can neither be accepted as a final answer (it would
+#: silently truncate the task) nor allowed to spin.
 EMPTY_RESPONSE_THRESHOLD = 2
 
 
 class ModelClient(Protocol):
-    """模型调用协议：编排层只依赖这一个方法。"""
+    """Model-call protocol: the orchestration layer depends on this method alone."""
 
     def chat(self, messages: Sequence[Message]) -> AssistantMsg:
-        """返回下一轮 ``AssistantMsg``（含 ``tool_calls`` 或最终文本）。"""
+        """Return the next ``AssistantMsg`` (with ``tool_calls`` or final text)."""
         ...
 
 
 class ToolResolver(Protocol):
-    """工具解析协议：``ToolCall → 可执行定义``。"""
+    """Tool-resolution protocol: ``ToolCall -> executable definition``."""
 
     def __call__(self, call: ToolCall) -> Any:
-        """返回带 ``fn`` / ``concurrency`` / ``idempotent`` 的对象。"""
+        """Return an object exposing ``fn`` / ``concurrency`` / ``idempotent``."""
         ...
 
 
 class BatchExecutor(Protocol):
-    """批次执行协议：与 :func:`harness.executor.execute_batch` 同签名。"""
+    """Batch-execution protocol: same signature as :func:`harness.executor.execute_batch`."""
 
     def __call__(
         self,
@@ -96,9 +103,9 @@ class BatchExecutor(Protocol):
 
 @dataclass
 class DeadlockTracker:
-    """死锁判据：连续 3 次失败 + 结果 hash 未变 + 未换工具路径。
+    """Deadlock criterion: 3 consecutive failures + unchanged result hash + same tool path.
 
-    三条同时满足才判死锁；任一条被打破即重置计数。
+    All three must hold to declare a deadlock; breaking any one resets the count.
     """
 
     threshold: int = DEADLOCK_THRESHOLD
@@ -107,7 +114,7 @@ class DeadlockTracker:
     _last_path: str = ""
 
     def record(self, *, ok: bool, content: str, path: str) -> bool:
-        """记录一次调用结果，返回是否判定死锁。"""
+        """Record one call result; returns whether a deadlock is declared."""
         if ok:
             self.reset()
             return False
@@ -116,27 +123,28 @@ class DeadlockTracker:
         if digest == self._last_hash and path == self._last_path:
             self._count += 1
         else:
-            # 换了工具路径或结果变化：重新计数
+            # Tool path changed or the result changed: restart the count
             self._count = 1
             self._last_hash = digest
             self._last_path = path
         return self._count >= self.threshold
 
     def reset(self) -> None:
-        """重置计数（成功调用、换工具、新批次时调用）。"""
+        """Reset the counters (called on success, tool switch or a new batch)."""
         self._count = 0
         self._last_hash = ""
         self._last_path = ""
 
 
 class StepController:
-    """步数闸门、注入计数、终止判定（§4.2）。
+    """Step gating, injection counting and termination decisions (§4.2).
 
-    三个终止条件相互独立，任一满足即要求结束本轮会话：
+    The three termination conditions are independent; any one of them requires
+    ending the current session turn:
 
-    * 步数达到 ``MAX_STEPS``；
-    * 注入次数达到 ``MAX_INJECTS``；
-    * 死锁判据命中。
+    * steps reach ``MAX_STEPS``;
+    * injections reach ``MAX_INJECTS``;
+    * the deadlock criterion fires.
     """
 
     def __init__(self, max_steps: int = MAX_STEPS, max_injects: int = MAX_INJECTS) -> None:
@@ -147,10 +155,10 @@ class StepController:
         self.deadlock = DeadlockTracker()
         self._stop_reason: str | None = None
 
-    # ---------------------------------------------------------- 闸门
+    # ------------------------------------------------------------- gates
 
     def begin_step(self) -> bool:
-        """开始新一步；返回 ``False`` 表示已达步数上限，不得继续。"""
+        """Begin a new step; ``False`` means the step limit is reached and work must stop."""
         if self.step >= self.max_steps:
             self._stop_reason = self._stop_reason or "max_steps"
             return False
@@ -158,11 +166,11 @@ class StepController:
         return True
 
     def can_inject(self) -> bool:
-        """本步是否还允许注入用户消息。"""
+        """Whether another user message may be injected in this turn."""
         return self.injects < self.max_injects
 
     def record_inject(self) -> bool:
-        """登记一次注入；返回 ``False`` 表示本次注入后达到上限。"""
+        """Record one injection; ``False`` means the limit was reached by this one."""
         self.injects += 1
         if self.injects >= self.max_injects:
             self._stop_reason = self._stop_reason or "max_injects"
@@ -170,39 +178,40 @@ class StepController:
         return True
 
     def record_tool_result(self, *, ok: bool, content: str, path: str) -> bool:
-        """登记一次工具结果，返回是否命中死锁判据。"""
+        """Record one tool result; returns whether the deadlock criterion fired."""
         if self.deadlock.record(ok=ok, content=content, path=path):
             self._stop_reason = self._stop_reason or "deadlock"
             return True
         return False
 
-    # ---------------------------------------------------------- 终止
+    # ------------------------------------------------------- termination
 
     @property
     def stop_reason(self) -> str | None:
-        """本会话的终止原因：``max_steps`` / ``max_injects`` / ``deadlock`` / ``None``。"""
+        """Stop reason for this session: ``max_steps`` / ``max_injects`` / ``deadlock`` / ``None``."""
         return self._stop_reason
 
     @property
     def should_stop(self) -> bool:
-        """是否应当结束会话。"""
+        """Whether the session should end."""
         return self._stop_reason is not None
 
     def mark_stop(self, reason: str) -> None:
-        """外部条件（上下文收尾等）要求结束时登记原因。"""
+        """Record a reason when an external condition (context wrap-up, ...) requires stopping."""
         self._stop_reason = self._stop_reason or reason
 
 
 @dataclass
 class LoopHooks:
-    """编排过程中的可选回调，全部默认为空操作。
+    """Optional callbacks during orchestration; all default to no-ops.
 
     Attributes:
-        on_assistant: 收到模型回复后调用（用于落库 / 写轨迹）。
-        on_group_done: 每个 ``ExecGroup`` 完成并回填后调用。
-        on_inject: 每注入一条用户消息后调用。
-        on_abort: 发生中止（control 信号）时调用，参数为原因。
-        on_summary: 上下文压缩触发时调用。
+        on_assistant: Called after a model reply (for persistence / tracing).
+        on_group_done: Called after each ``ExecGroup`` completes and is backfilled.
+        on_inject: Called after each injected user message.
+        on_abort: Called when an abort happens (control signal); the argument is
+            the reason.
+        on_summary: Called when context compression fires.
     """
 
     on_assistant: Callable[[AssistantMsg], None] | None = None
@@ -214,14 +223,14 @@ class LoopHooks:
 
 @dataclass
 class LoopResult:
-    """一轮会话的最终结果。
+    """Final result of one session turn.
 
     Attributes:
-        messages: 会话消息（未持久化，由调用方决定落库）。
-        final_text: 最终答案文本；因中止结束时为 ``None``。
-        steps: 实际推进的步数。
-        stop_reason: 终止原因。
-        aborted: 是否因 ``control`` 信号中止。
+        messages: Session messages (not persisted; the caller decides).
+        final_text: Final answer text; ``None`` when ending due to an abort.
+        steps: Number of steps actually taken.
+        stop_reason: Reason for stopping.
+        aborted: Whether the turn ended due to a ``control`` signal.
     """
 
     messages: list[Message]
@@ -234,16 +243,20 @@ class LoopResult:
 
 
 class AgentLoop:
-    """ReAct 主循环（§4.2）。
+    """The ReAct main loop (§4.2).
 
-    职责边界：
+    Responsibility boundaries:
 
-    * **是**控制流唯一持有者：决定何时调模型、何时执行工具、何时检查安全点。
-    * **不是**工具执行器：批次执行委托给注入的 ``executor``。
-    * **不是**消息构造器：``SystemMsg`` 与投影由上下文层负责，本类只追加
-      ``UserMsg`` / ``AssistantMsg`` / ``ToolMsg``。
+    * **Is** the sole owner of control flow: decides when to call the model,
+      when to execute tools and when to check safe points.
+    * **Is not** a tool executor: batch execution is delegated to the injected
+      ``executor``.
+    * **Is not** a message builder: the ``SystemMsg`` and projection belong to the
+      context layer; this class only appends ``UserMsg`` / ``AssistantMsg`` /
+      ``ToolMsg``.
 
-    构造参数全部注入，因此单元测试可用假模型 / 假执行器完整覆盖安全点语义。
+    Every constructor argument is injected, so unit tests can fully cover the
+    safe-point semantics with a fake model and a fake executor.
     """
 
     def __init__(
@@ -271,42 +284,47 @@ class AgentLoop:
         self.controller = controller or StepController()
         self.hooks = hooks or LoopHooks()
         self.max_workers = max_workers
-        #: 可选上下文装配器；不传则按朴素实现直接调用模型（I4 无损退化）。
+        #: Optional context assembler; when absent the model is called directly
+        #: with a naive path (lossless degradation per I4).
         self.assembler = assembler
-        #: 连续空回复计数（无文本、无工具调用），见 EMPTY_RESPONSE_THRESHOLD。
+        #: Consecutive empty replies (no text, no tool calls); see
+        #: EMPTY_RESPONSE_THRESHOLD.
         self._empty_responses = 0
         self.empty_response_threshold = EMPTY_RESPONSE_THRESHOLD
-        #: 可选 Jev 路由器；不传则不路由（等价全量暴露）。
+        #: Optional Jev router; when absent no routing happens (equivalent to full
+        #: exposure).
         self.router = router
-        #: 候选一级分支获取器；与 ``router`` 配对使用。
+        #: Candidate top-level branch provider; used together with ``router``.
         self.branch_provider = branch_provider
-        #: 工具总数获取器，用于路由启用条件判定。
+        #: Total tool count provider, for the routing enable conditions.
         self.tool_count_provider = tool_count_provider
-        #: 历史 token 获取器，用于路由启用条件判定。
+        #: History token provider, for the routing enable conditions.
         self.history_tokens_provider = history_tokens_provider
-        #: 最近一次路由决策（便于外部写轨迹）。
+        #: Most recent routing decision (so callers can write traces).
         self.last_route: RouteDecision | None = None
 
-    # ------------------------------------------------------------ 主循环
+    # ------------------------------------------------------------ main loop
 
     def run(self, history: Sequence[Message] | None = None) -> LoopResult:
-        """运行到最终答案、步数耗尽或中止。
+        """Run until a final answer, step exhaustion or an abort.
 
         Args:
-            history: 既有会话消息；``None`` 表示新会话（自动装配 ``SystemMsg``）。
+            history: Existing session messages; ``None`` means a new session
+                (the ``SystemMsg`` is assembled automatically).
 
         Returns:
-            含最终文本与终止原因的 :class:`LoopResult`。
+            A :class:`LoopResult` with the final text and stop reason.
         """
         messages: list[Message] = list(history) if history else [self.system_msg]
         if not isinstance(messages[0], SystemMsg):
-            raise MessageInvariantError("A1", "messages[0] 必须是 SystemMsg")
+            raise MessageInvariantError("A1", "messages[0] must be SystemMsg")
 
         aborted = False
         final_text: str | None = None
 
         while self.controller.begin_step():
-            # ---- 安全点①：LLM 返回前先消费上一轮遗留的插话 ----
+            # ---- Safe point 1: consume injections left over from the previous
+            # turn before calling the LLM ----
             if not self._drain_at_safe_point(messages, "safe_point_1"):
                 aborted = True
                 break
@@ -323,10 +341,11 @@ class AgentLoop:
                 final_text = assistant.content
                 break
 
-            # ---- 空回复：既无 tool_calls 也无文本 ----
-            # ponytail: 模型偶尔返回 content="" + 无调用。既不能当最终答案
-            # （会静默截断任务），也不能继续 plan_batch（空计划空转）。
-            # 记一次失败，连续 empty_response_threshold 次则中止。
+            # ---- Empty reply: neither tool_calls nor text ----
+            # Note: the model occasionally returns content="" with no calls. That
+            # can neither be a final answer (it would silently truncate the task)
+            # nor proceed to plan_batch (an empty plan spins). Count a failure and
+            # abort after empty_response_threshold consecutive ones.
             if not assistant.tool_calls:
                 self._empty_responses += 1
                 if self._empty_responses >= self.empty_response_threshold:
@@ -335,22 +354,23 @@ class AgentLoop:
                 continue
             self._empty_responses = 0
 
-            # ---- Jev 路由（优化路径，失败即全量，I4）----
+            # ---- Jev routing (an optimization; fall back to full on failure, I4) ----
             self._maybe_route(messages)
 
-            # ---- 工具批次 ----
+            # ---- Tool batch ----
             plan = plan_batch(list(assistant.tool_calls), self._concurrency_of)
             stop_after = self._execute(plan, messages)
 
             if stop_after is not None:
-                # D7 / G1：停止剩余组后补占位，再按 G3 插入附带文本
+                # D7 / G1: fill placeholders after stopping the remaining groups,
+                # then insert the attached text per G3.
                 self._fill_and_append(messages, plan, stop_after)
                 aborted = True
                 if self.hooks.on_abort is not None:
                     self.hooks.on_abort(stop_after.reason)
                 break
 
-            # ---- 安全点③：全批完成，两通道都可消费 ----
+            # ---- Safe point 3: batch complete, both channels consumable ----
             if not self._drain_at_safe_point(messages, "safe_point_3"):
                 aborted = True
                 break
@@ -370,20 +390,22 @@ class AgentLoop:
             route=self.last_route,
         )
 
-    # ------------------------------------------------------------ 上下文装配
+    # --------------------------------------------------- context assembly
 
     def _assemble(self, messages: list[Message]) -> list[Message]:
-        """装配待发送消息（C1/C2/C3）。
+        """Assemble the messages to send (C1/C2/C3).
 
-        未注入 ``assembler`` 时直接返回原列表——优化缺失必须无损退化（I4）。
-        水位达到 ``session_end`` 时登记收尾原因，本轮不再继续推进。
+        Without an injected ``assembler`` the list is returned as-is -- a missing
+        optimization must degrade losslessly (I4). When the watermark reaches
+        ``session_end`` a wrap-up reason is recorded and this turn stops advancing.
         """
         if self.assembler is None:
             return messages
 
         result = self.assembler.assemble(messages)
         if result.compressed:
-            # 压缩会重建列表，必须用新列表继续，否则后续追加会写到旧对象
+            # Compression rebuilds the list, so we must continue with the new one;
+            # otherwise later appends would write into the old object.
             messages[:] = result.messages
             if self.hooks.on_summary is not None:
                 self.hooks.on_summary(result.action)
@@ -393,13 +415,13 @@ class AgentLoop:
 
         return result.messages
 
-    # ------------------------------------------------------------ 路由
+    # -------------------------------------------------------------- routing
 
     def _maybe_route(self, messages: list[Message]) -> None:
-        """按启用条件执行一次 Jev 路由。
+        """Run one Jev routing pass when the enable conditions hold.
 
-        ``state`` 只放 query（最后一条 UserMsg），不放任何工具输出；
-        任何异常都收敛为回退决策（I4）。
+        ``state`` carries the query only (the last ``UserMsg``) and never any tool
+        output; every exception converges to a fallback decision (I4).
         """
         if self.router is None or self.branch_provider is None:
             return
@@ -423,10 +445,10 @@ class AgentLoop:
             tool_count=tool_count,
         )
 
-    # ------------------------------------------------------------ 批次执行
+    # ------------------------------------------------------ batch execution
 
     def _concurrency_of(self, call: ToolCall) -> str:
-        """从 ``ToolDef`` 读取并发性；解析失败时保守取 ``exclusive``（I4）。"""
+        """Read concurrency from ``ToolDef``; fall back conservatively to ``exclusive`` (I4)."""
         try:
             tool = self.resolver(call)
         except Exception:
@@ -438,9 +460,10 @@ class AgentLoop:
         plan: BatchPlan,
         messages: list[Message],
     ) -> InterruptRequest | None:
-        """执行整批；返回中断信号表示需要停止剩余组。
+        """Execute the whole batch; a returned interrupt means the remaining groups must stop.
 
-        组完成回调实现安全点②：只消费 ``control``，**不消费** ``chat``（G2）。
+        The group-done callback implements safe point ②: it consumes ``control``
+        only and **never** consumes ``chat`` (G2).
         """
         interrupt: InterruptRequest | None = None
 
@@ -461,7 +484,7 @@ class AgentLoop:
             max_workers=self.max_workers,
         )
 
-        # D3：按组序 + 组内序回填，绝不按完成顺序
+        # D3: backfill in group order then intra-group order, never completion order
         for group in plan.groups:
             for call in group.calls:
                 result = results.get(call.id)
@@ -477,7 +500,7 @@ class AgentLoop:
                 if self.controller.record_tool_result(
                     ok=result.ok, content=result.content, path=call.name
                 ):
-                    # 死锁判据命中：不再继续推进
+                    # Deadlock criterion fired: stop advancing
                     self.controller.mark_stop("deadlock")
 
         return interrupt
@@ -488,7 +511,7 @@ class AgentLoop:
         plan: BatchPlan,
         signal: InterruptRequest,
     ) -> None:
-        """G1 / D7：补 3e 占位；G3：``text`` 非空时再插入 ``UserMsg``。"""
+        """G1 / D7: fill ``3e`` placeholders; G3: insert a ``UserMsg`` when ``text`` is non-empty."""
         filled = {
             msg.tool_call_id
             for msg in messages
@@ -500,17 +523,19 @@ class AgentLoop:
         if signal.text:
             self._inject_user_msg(messages, signal.text, channel="control")
 
-    # ------------------------------------------------------------ 安全点
+    # ------------------------------------------------------------ safe points
 
     def _drain_at_safe_point(self, messages: list[Message], label: str) -> bool:
-        """完整安全点：先 control 后 chat（G4）。
+        """Full safe point: handle ``control`` first, then ``chat`` (G4).
 
         Returns:
-            ``True`` 表示可继续；``False`` 表示收到 ``control``，本轮应结束。
+            ``True`` to continue; ``False`` when a ``control`` signal arrived and
+            this turn should end.
         """
         signal, chats = self.inbox.drain_at_full_safe_point()
         if signal is not None:
-            # ① / ③ 处无剩余组可停，直接作为中止原因
+            # At ① / ③ no remaining groups exist to stop, so this becomes the
+            # abort reason directly.
             return False
 
         for item in chats:
@@ -519,14 +544,15 @@ class AgentLoop:
         return True
 
     def _inject_user_msg(self, messages: list[Message], text: str, channel: str) -> None:
-        """插入一条 ``UserMsg`` 并登记注入次数。
+        """Insert one ``UserMsg`` and record the injection count.
 
-        未闭合 ``tool_calls`` 序列内部禁止插入（D8 / I6）——安全点保证调用方
-        只在合法位置调用本方法；此处做一次防御性校验。
+        Insertion inside an unclosed ``tool_calls`` sequence is forbidden
+        (D8 / I6) -- safe points guarantee callers only invoke this at legal
+        positions; this is a defensive check.
         """
         if _has_unclosed_tool_calls(messages):
             raise MessageInvariantError(
-                "I6", f"{channel} 通道消息不得插入未闭合的 tool_calls 序列"
+                "I6", f"{channel} channel messages must not be inserted into an unclosed tool_calls sequence"
             )
 
         msg = UserMsg(content=text)
@@ -538,7 +564,7 @@ class AgentLoop:
 
 
 def _has_unclosed_tool_calls(messages: Sequence[Message]) -> bool:
-    """是否存在未配对的 ``tool_calls``。"""
+    """Whether any ``tool_calls`` remain unpaired."""
     pending: set[str] = set()
     for msg in messages:
         if isinstance(msg, AssistantMsg):
@@ -549,9 +575,10 @@ def _has_unclosed_tool_calls(messages: Sequence[Message]) -> bool:
 
 
 def _last_user_text(messages: Sequence[Message]) -> str:
-    """取最近一条 ``UserMsg`` 的文本，作为路由 query。
+    """Return the text of the most recent ``UserMsg``, used as the routing query.
 
-    文档 §4.4：``state`` 只放 query，不放工具输出（防 JPDH）。
+    Design doc §4.4: ``state`` carries the query only, never tool output (guards
+    against JPDH).
     """
     for msg in reversed(messages):
         if isinstance(msg, UserMsg):
