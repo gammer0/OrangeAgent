@@ -4,194 +4,349 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Harness Console</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600&display=swap" rel="stylesheet">
 <style>
+  /* ============================================================
+     ANCHOR: Industrial
+     Surface  #000000 / warm-black #0B0C0A
+     Type     IBM Plex Mono, JetBrains Mono, Berkeley Mono — mono only
+     Signal   green #00E676 (single semantic)
+     Struct   flat, 1px borders, no shadows, no radii, tabular-nums
+     ============================================================ */
   :root {
-    --bg: #0f1115;
-    --panel: #171a21;
-    --panel-2: #1e222b;
-    --border: #2a2f3a;
-    --text: #e6e9ef;
-    --muted: #8b93a3;
-    --accent: #4a8cff;
-    --ok: #3ecf8e;
-    --warn: #f5a524;
-    --err: #ef4444;
-    --mono: ui-monospace, "Cascadia Code", Consolas, monospace;
+    --bg: #000000;
+    --panel: #0B0C0A;
+    --panel-2: #101210;
+    --line: #24271F;
+    --line-2: #34382C;
+    --text: #D8DCD0;
+    --muted: #6E7466;
+    --faint: #464B40;
+    --sig: #00E676;
+    --sig-dim: #00E67622;
+    --err: #FF3B30;
+    --err-dim: #FF3B3020;
+    --mono: "IBM Plex Mono", "JetBrains Mono", "Berkeley Mono",
+            ui-monospace, "Cascadia Mono", Consolas, monospace;
   }
   * { box-sizing: border-box; }
   html, body { height: 100%; margin: 0; }
   body {
     background: var(--bg); color: var(--text);
-    font: 14px/1.6 -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
-    display: grid; grid-template-columns: 260px 1fr 340px;
-    grid-template-rows: 48px 1fr;
+    font: 13px/1.55 var(--mono);
+    font-variant-numeric: tabular-nums;
+    display: grid; grid-template-columns: 272px 1fr 348px;
+    grid-template-rows: 52px 1fr;
     grid-template-areas: "head head head" "sessions chat side";
     overflow: hidden;
+    -webkit-font-smoothing: antialiased;
   }
+  ::selection { background: var(--sig); color: #000; }
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-track { background: var(--bg); }
+  ::-webkit-scrollbar-thumb { background: var(--line); border: 2px solid var(--bg); }
+  ::-webkit-scrollbar-thumb:hover { background: var(--line-2); }
 
   /* ---- Header ---- */
   header {
-    grid-area: head; display: flex; align-items: center; gap: 12px;
-    padding: 0 14px; background: var(--panel); border-bottom: 1px solid var(--border);
+    grid-area: head; display: flex; align-items: center; gap: 14px;
+    padding: 0 16px; background: var(--panel);
+    border-bottom: 1px solid var(--line-2);
   }
-  header h1 { font-size: 14px; margin: 0; font-weight: 600; letter-spacing: .4px; }
-  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
-  .dot.ok { background: var(--ok); } .dot.err { background: var(--err); }
+  header h1 {
+    font-size: 13px; margin: 0; font-weight: 600;
+    letter-spacing: .22em; text-transform: uppercase;
+  }
+  header h1::after {
+    content: ""; display: block; height: 2px; width: 100%;
+    background: var(--sig); margin-top: 3px;
+  }
+  .dot {
+    width: 7px; height: 7px; background: var(--faint);
+    box-shadow: 0 0 0 1px var(--line-2);
+  }
+  .dot.ok { background: var(--sig); box-shadow: 0 0 8px var(--sig); }
+  .dot.err { background: var(--err); box-shadow: 0 0 8px var(--err); }
   .spacer { flex: 1; }
   select, button, input, textarea {
     font: inherit; color: var(--text); background: var(--panel-2);
-    border: 1px solid var(--border); border-radius: 6px; padding: 6px 9px;
+    border: 1px solid var(--line); border-radius: 0; padding: 7px 10px;
+    outline: none;
   }
-  button { cursor: pointer; transition: border-color .15s, background .15s; }
-  button:hover { border-color: var(--accent); }
-  button:disabled { opacity: .45; cursor: not-allowed; }
-  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
-  button.danger { color: var(--err); }
+  select:focus, input:focus, textarea:focus { border-color: var(--sig); }
+  button {
+    cursor: pointer; text-transform: uppercase; letter-spacing: .1em;
+    font-size: 11px; transition: background .12s, color .12s, border-color .12s;
+  }
+  button:hover:not(:disabled) { border-color: var(--sig); color: var(--sig); }
+  button:disabled { opacity: .35; cursor: not-allowed; }
+  button.primary {
+    background: var(--sig); border-color: var(--sig); color: #000; font-weight: 600;
+  }
+  button.primary:hover:not(:disabled) { background: #00FF82; color: #000; }
+  button.danger { color: var(--err); border-color: var(--line); }
+  button.danger:hover:not(:disabled) { border-color: var(--err); color: var(--err); }
+  label { text-transform: uppercase; letter-spacing: .12em; font-size: 10px; }
 
-  /* ---- Sessions ---- */
+  /* ---- Sessions: sequenced ruler ---- */
   #sessions {
-    grid-area: sessions; background: var(--panel); border-right: 1px solid var(--border);
+    grid-area: sessions; background: var(--panel); border-right: 1px solid var(--line-2);
     display: flex; flex-direction: column; min-height: 0;
   }
-  #sessions .top { padding: 10px; border-bottom: 1px solid var(--border); }
-  #sessions .top button { width: 100%; }
-  #session-list { overflow-y: auto; flex: 1; padding: 6px; }
+  #sessions .top {
+    padding: 12px 14px; border-bottom: 1px solid var(--line);
+    display: flex; justify-content: space-between; align-items: baseline;
+  }
+  #sessions .top .k {
+    font-size: 10px; letter-spacing: .16em; text-transform: uppercase; color: var(--muted);
+  }
+  #sessions .top .v { font-size: 11px; color: var(--text); }
+  #session-list { overflow-y: auto; flex: 1; padding: 0; }
   .sess {
-    padding: 8px 10px; border-radius: 6px; cursor: pointer; margin-bottom: 4px;
-    border: 1px solid transparent; display: flex; gap: 8px; align-items: center;
+    position: relative; padding: 10px 12px 10px 66px; cursor: pointer;
+    border-bottom: 1px solid var(--line);
+    display: flex; gap: 8px; align-items: center;
+    transition: background .12s;
   }
   .sess:hover { background: var(--panel-2); }
-  .sess.active { background: var(--panel-2); border-color: var(--accent); }
-  .sess .id { font-family: var(--mono); font-size: 12px; flex: 1; overflow: hidden; text-overflow: ellipsis; }
-  .sess .st { font-size: 11px; color: var(--muted); }
-  .sess .st.running { color: var(--accent); }
-  .sess .st.done { color: var(--ok); }
-  .sess .st.error { color: var(--err); }
-  .sess .kill { opacity: 0; color: var(--muted); padding: 0 4px; background: none; border: none; }
+  /* index number sits on a hairline rule, like a gauge channel mark */
+  .sess::before {
+    position: absolute; left: 10px; top: 0; bottom: 0; width: 38px;
+    display: grid; place-items: center;
+    font-size: 20px; font-weight: 300; line-height: 1;
+    color: var(--faint); letter-spacing: -.04em;
+    content: attr(data-idx);
+    border-right: 1px solid var(--line);
+    transition: color .12s;
+  }
+  .sess:hover::before { color: var(--muted); }
+  .sess.active { background: var(--panel-2); }
+  .sess.active::before { color: var(--sig); }
+  .sess.active::after {
+    content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 2px;
+    background: var(--sig);
+  }
+  .sess .id {
+    font-size: 11px; flex: 1; overflow: hidden;
+    text-overflow: ellipsis; white-space: nowrap; color: var(--text);
+  }
+  .sess .st {
+    font-size: 9px; letter-spacing: .1em; text-transform: uppercase;
+    color: var(--muted); border: 1px solid var(--line); padding: 1px 5px;
+    flex: none;
+  }
+  .sess .st.running { color: var(--sig); border-color: var(--sig); }
+  .sess .st.done { color: var(--muted); border-color: var(--line-2); }
+  .sess .st.aborted { color: var(--muted); border-color: var(--line-2); }
+  .sess .st.error { color: var(--err); border-color: var(--err); }
+  .sess .kill {
+    opacity: 0; color: var(--muted); padding: 0 2px; background: none;
+    border: none; font-size: 13px; line-height: 1; flex: none;
+  }
+  .sess .kill:hover { color: var(--err); border: none; }
   .sess:hover .kill { opacity: 1; }
 
   /* ---- Chat ---- */
   #chat { grid-area: chat; display: flex; flex-direction: column; min-height: 0; }
-  #stream { flex: 1; overflow-y: auto; padding: 16px 20px; }
-  .msg { margin-bottom: 16px; display: flex; gap: 10px; }
+  #stream { flex: 1; overflow-y: auto; padding: 18px 22px; }
+  .msg { margin-bottom: 18px; display: flex; gap: 0; position: relative; }
   .msg .avatar {
-    width: 26px; height: 26px; border-radius: 6px; flex: none;
-    display: grid; place-items: center; font-size: 11px; font-weight: 700;
-    background: var(--panel-2); color: var(--muted);
+    width: 52px; flex: none; padding-top: 1px;
+    font-size: 9px; letter-spacing: .12em; text-transform: uppercase;
+    color: var(--faint);
   }
-  .msg.user .avatar { background: #26344d; color: #9db8e8; }
-  .msg.assistant .avatar { background: #24382f; color: var(--ok); }
-  .msg .body { min-width: 0; flex: 1; }
-  .msg .body .text { white-space: pre-wrap; word-break: break-word; }
-  .msg .meta { font-size: 11px; color: var(--muted); margin-top: 4px; font-family: var(--mono); }
+  .msg.user .avatar { color: var(--muted); }
+  .msg.assistant .avatar { color: var(--sig); }
+  .msg .body { min-width: 0; flex: 1; border-left: 1px solid var(--line); padding-left: 14px; }
+  .msg.user .body { border-left-color: var(--line-2); }
+  .msg.assistant .body { border-left-color: var(--sig); }
+  .msg .body .text { white-space: pre-wrap; word-break: break-word; color: var(--text); }
+  .msg.user .body .text { color: #E8ECE2; }
+  .msg .meta {
+    font-size: 9px; color: var(--faint); margin-top: 6px;
+    letter-spacing: .1em; text-transform: uppercase;
+  }
 
   .tool-card {
-    border: 1px solid var(--border); border-left: 3px solid var(--warn);
-    background: var(--panel); border-radius: 6px; padding: 8px 10px;
-    margin: 8px 0; font-family: var(--mono); font-size: 12px;
+    border: 1px solid var(--line); background: var(--panel);
+    padding: 0; margin: 8px 0;
+    font-size: 11px;
   }
-  .tool-card.err { border-left-color: var(--err); }
-  .tool-card .path { color: var(--warn); }
-  .tool-card .path.err { color: var(--err); }
+  .tool-card.err { border-color: var(--err); }
+  .tool-card .path {
+    padding: 5px 9px; border-bottom: 1px solid var(--line);
+    color: var(--text); letter-spacing: .02em;
+    background: var(--panel-2); display: flex; justify-content: space-between;
+  }
+  .tool-card .path.err { color: var(--err); border-bottom-color: var(--err-dim); }
+  .tool-card .path .op {
+    font-size: 9px; letter-spacing: .12em; text-transform: uppercase; color: var(--faint);
+  }
   .tool-card pre {
-    margin: 6px 0 0; white-space: pre-wrap; word-break: break-word;
-    color: var(--muted); max-height: 180px; overflow: auto;
+    margin: 0; padding: 8px 9px;
+    white-space: pre-wrap; word-break: break-word;
+    color: var(--muted); max-height: 190px; overflow: auto;
+    font-family: var(--mono); font-size: 11px; line-height: 1.5;
   }
+  .tool-card pre.args { color: #9AA192; border-bottom: 1px solid var(--line); }
 
-  .thinking { display: flex; gap: 4px; padding: 6px 0; }
+  .thinking { display: flex; gap: 0; padding: 4px 0; align-items: center; }
+  .thinking::after {
+    content: "执行中"; font-size: 9px; letter-spacing: .12em;
+    text-transform: uppercase; color: var(--sig); margin-left: 8px;
+  }
   .thinking span {
-    width: 6px; height: 6px; border-radius: 50%; background: var(--accent);
-    animation: pulse 1.2s infinite;
+    width: 14px; height: 3px; background: var(--sig); opacity: .2;
+    animation: sweep 1.15s infinite;
   }
-  .thinking span:nth-child(2) { animation-delay: .15s; }
-  .thinking span:nth-child(3) { animation-delay: .3s; }
-  @keyframes pulse { 0%, 100% { opacity: .25; } 50% { opacity: 1; } }
+  .thinking span:nth-child(2) { animation-delay: .14s; }
+  .thinking span:nth-child(3) { animation-delay: .28s; }
+  @keyframes sweep {
+    0%, 100% { opacity: .15; }
+    45% { opacity: 1; }
+  }
 
-  #composer { border-top: 1px solid var(--border); padding: 10px 14px; background: var(--panel); }
-  #composer .row { display: flex; gap: 8px; align-items: flex-end; }
-  #input {
-    flex: 1; resize: none; min-height: 42px; max-height: 160px;
-    font-family: inherit; line-height: 1.5;
+  #composer {
+    border-top: 1px solid var(--line-2); padding: 12px 16px 10px; background: var(--panel);
   }
-  #composer .hint { font-size: 11px; color: var(--muted); margin-top: 6px; }
+  #composer .row { display: flex; gap: 8px; align-items: stretch; }
+  #input {
+    flex: 1; resize: none; min-height: 46px; max-height: 170px;
+    font-family: var(--mono); line-height: 1.55; font-size: 13px;
+  }
+  #composer .hint {
+    font-size: 10px; color: var(--faint); margin-top: 8px; letter-spacing: .04em;
+  }
   kbd {
-    background: var(--panel-2); border: 1px solid var(--border);
-    border-radius: 4px; padding: 0 4px; font-family: var(--mono); font-size: 11px;
+    background: var(--panel-2); border: 1px solid var(--line);
+    padding: 0 4px; font-family: var(--mono); font-size: 10px; color: var(--muted);
   }
 
   /* ---- Side ---- */
   #side {
-    grid-area: side; background: var(--panel); border-left: 1px solid var(--border);
+    grid-area: side; background: var(--panel); border-left: 1px solid var(--line-2);
     display: flex; flex-direction: column; min-height: 0;
   }
-  .tabs { display: flex; border-bottom: 1px solid var(--border); }
+  .tabs { display: flex; border-bottom: 1px solid var(--line-2); }
   .tabs button {
-    flex: 1; border: none; border-radius: 0; background: none;
-    padding: 10px; color: var(--muted); border-bottom: 2px solid transparent;
+    flex: 1; border: none; border-right: 1px solid var(--line); border-radius: 0;
+    background: none; padding: 11px 8px; color: var(--faint);
+    letter-spacing: .12em; font-size: 10px;
   }
-  .tabs button.active { color: var(--text); border-bottom-color: var(--accent); }
-  .tab-body { flex: 1; overflow-y: auto; padding: 12px; }
+  .tabs button:last-child { border-right: none; }
+  .tabs button:hover { color: var(--muted); border-color: var(--line); }
+  .tabs button.active {
+    color: var(--sig); background: var(--panel-2);
+    box-shadow: inset 0 -2px 0 var(--sig);
+  }
+  .tab-body { flex: 1; overflow-y: auto; padding: 14px; }
   .tab-body.hidden { display: none; }
 
-  .meter { height: 6px; background: var(--panel-2); border-radius: 3px; overflow: hidden; margin: 6px 0 2px; }
-  .meter > i { display: block; height: 100%; background: var(--ok); width: 0; transition: width .3s; }
-  .meter.warn > i { background: var(--warn); }
-  .meter.err > i { background: var(--err); }
-  .kv { display: flex; justify-content: space-between; font-size: 12px; padding: 3px 0; }
-  .kv .k { color: var(--muted); }
-  .kv .v { font-family: var(--mono); }
-
-  .trace-item { font-size: 12px; padding: 6px 0; border-bottom: 1px solid var(--border); }
-  .trace-item .h { display: flex; gap: 6px; align-items: center; }
-  .trace-item .t { font-family: var(--mono); color: var(--muted); font-size: 11px; }
-  .tag {
-    font-size: 10px; padding: 0 5px; border-radius: 3px; font-family: var(--mono);
-    background: var(--panel-2); color: var(--muted); text-transform: uppercase;
+  .meter {
+    height: 5px; background: var(--panel-2); overflow: hidden; margin: 7px 0 14px;
+    border: 1px solid var(--line);
   }
-  .tag.assistant { color: var(--ok); } .tag.tool { color: var(--warn); }
-  .tag.route { color: var(--accent); } .tag.error { color: var(--err); }
-  .tag.compress { color: #b78bfa; }
+  .meter > i {
+    display: block; height: 100%; background: var(--sig); width: 0;
+    transition: width .3s;
+  }
+  .meter.warn > i { background: #FFB800; }
+  .meter.err > i { background: var(--err); }
+  .kv {
+    display: flex; justify-content: space-between; align-items: baseline;
+    font-size: 11px; padding: 4px 0;
+  }
+  .kv .k {
+    color: var(--faint); letter-spacing: .1em; text-transform: uppercase; font-size: 10px;
+  }
+  .kv .v { color: var(--text); }
 
-  .ctx-item { font-size: 12px; padding: 6px 8px; border-radius: 5px; margin-bottom: 4px; background: var(--panel-2); }
-  .ctx-item .role { font-family: var(--mono); font-size: 10px; color: var(--muted); text-transform: uppercase; }
-  .ctx-item .c { white-space: pre-wrap; word-break: break-word; max-height: 90px; overflow: auto; margin-top: 2px; }
+  .trace-item { padding: 8px 0; border-bottom: 1px solid var(--line); font-size: 11px; }
+  .trace-item:last-child { border-bottom: none; }
+  .trace-item .h { display: flex; gap: 8px; align-items: center; }
+  .trace-item .t { color: var(--faint); font-size: 10px; }
+  .trace-item .sum { color: var(--muted); margin-top: 3px; line-height: 1.5; word-break: break-word; }
+  .tag {
+    font-size: 9px; padding: 1px 5px; letter-spacing: .1em; text-transform: uppercase;
+    background: var(--panel-2); color: var(--muted); border: 1px solid var(--line);
+  }
+  .tag.assistant { color: var(--sig); border-color: var(--sig); }
+  .tag.tool { color: #FFB800; border-color: #FFB80044; }
+  .tag.route { color: #9AA192; border-color: var(--line-2); }
+  .tag.error { color: var(--err); border-color: var(--err); }
+  .tag.compress { color: #B78BFA; border-color: #B78BFA44; }
+  .tag.state { color: #7FA8DC; border-color: #7FA8DC44; }
+  .tag.usage { color: #7FA8DC; border-color: #7FA8DC44; }
+  .tag.inject { color: #E0D06A; border-color: #E0D06A44; }
 
-  .empty { color: var(--muted); font-size: 12px; text-align: center; padding: 24px 8px; }
+  .ctx-item {
+    font-size: 11px; padding: 8px 9px; margin-bottom: 6px;
+    background: var(--panel-2); border: 1px solid var(--line);
+    border-left: 2px solid var(--line-2);
+  }
+  .ctx-item .role {
+    font-size: 9px; color: var(--muted); letter-spacing: .1em; text-transform: uppercase;
+  }
+  .ctx-item .c {
+    white-space: pre-wrap; word-break: break-word; max-height: 92px;
+    overflow: auto; margin-top: 4px; color: var(--muted); line-height: 1.5;
+  }
+
+  .empty {
+    color: var(--faint); font-size: 10px; text-align: center; padding: 28px 8px;
+    letter-spacing: .12em; text-transform: uppercase;
+  }
   #banner {
-    display: none; margin: 10px 14px; padding: 8px 10px; border-radius: 6px;
-    background: #3a2020; border: 1px solid var(--err); color: #ffb4b4; font-size: 12px;
+    display: none; margin: 12px 22px 0; padding: 9px 11px;
+    background: var(--err-dim); border: 1px solid var(--err); color: #FF9E97; font-size: 11px;
+  }
+
+  @media (max-width: 1180px) {
+    body { grid-template-columns: 216px 1fr 296px; }
+    .sess { padding-left: 52px; }
+    .sess::before { width: 26px; left: 8px; font-size: 17px; }
+  }
+  @media (max-width: 900px) {
+    body {
+      grid-template-columns: 1fr; grid-template-rows: 52px 1fr auto;
+      grid-template-areas: "head" "chat" "side";
+    }
+    #sessions { display: none; }
+    #side { border-left: none; border-top: 1px solid var(--line-2); max-height: 40vh; }
   }
 </style>
 </head>
 <body>
 <header>
-  <h1>HARNESS</h1>
+  <h1>Harness</h1>
   <span class="dot" id="health-dot" title="服务状态"></span>
-  <span id="health-text" style="color:var(--muted);font-size:12px">连接中…</span>
+  <span id="health-text">连接中</span>
   <div class="spacer"></div>
-  <label style="font-size:12px;color:var(--muted)">模型</label>
+  <label for="model-select">模型</label>
   <select id="model-select" title="新建会话使用的模型"></select>
   <button id="new-session" class="primary">新建会话</button>
 </header>
 
 <aside id="sessions">
   <div class="top">
-    <div class="kv"><span class="k">会话</span><span class="v" id="sess-count">0</span></div>
+    <span class="k">会话</span><span class="v" id="sess-count">0</span>
   </div>
   <div id="session-list"><div class="empty">暂无会话</div></div>
 </aside>
 
 <main id="chat">
   <div id="banner"></div>
-  <div id="stream"><div class="empty">选择或新建一个会话开始</div></div>
+  <div id="stream"><div class="empty">选择或新建一个会话</div></div>
   <div id="composer">
     <div class="row">
-      <textarea id="input" placeholder="输入消息…（Ctrl+Enter 发送，Ctrl+Shift+Enter 立即插入）"></textarea>
+      <textarea id="input" placeholder="输入消息"></textarea>
       <button id="send" class="primary">发送</button>
       <button id="stop" class="danger" disabled>中止</button>
     </div>
     <div class="hint">
-      <kbd>Enter</kbd> 换行 · <kbd>Ctrl</kbd>+<kbd>Enter</kbd> 等待插入 · <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Enter</kbd> 立即插入
+      <kbd>Enter</kbd> 换行 &nbsp; <kbd>Ctrl</kbd>+<kbd>Enter</kbd> 等待插入 &nbsp; <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Enter</kbd> 立即插入
     </div>
   </div>
 </main>
@@ -203,18 +358,18 @@
     <button data-tab="tools">工具</button>
   </div>
   <div class="tab-body" id="tab-trace">
-    <div class="kv"><span class="k">水位</span><span class="v" id="usage-text">—</span></div>
+    <div class="kv"><span class="k">上下文水位</span><span class="v" id="usage-text">—</span></div>
     <div class="meter" id="usage-meter"><i></i></div>
     <div id="trace-list"><div class="empty">暂无事件</div></div>
   </div>
   <div class="tab-body hidden" id="tab-context">
     <div class="kv"><span class="k">消息数</span><span class="v" id="ctx-count">0</span></div>
     <div class="kv"><span class="k">估算 token</span><span class="v" id="ctx-tokens">0</span></div>
-    <div style="margin:8px 0 12px"><button id="refresh-context" style="width:100%">刷新上下文</button></div>
+    <div style="margin:10px 0 14px"><button id="refresh-context" style="width:100%">刷新上下文</button></div>
     <div id="ctx-list"><div class="empty">暂无消息</div></div>
   </div>
   <div class="tab-body hidden" id="tab-tools">
-    <div id="tool-list"><div class="empty">加载中…</div></div>
+    <div id="tool-list"><div class="empty">加载中</div></div>
   </div>
 </aside>
 
@@ -274,8 +429,8 @@ async function loadHealth() {
     const h = await api("/api/health");
     $("health-dot").className = "dot " + (h.ok ? "ok" : "err");
     $("health-text").textContent = h.ok
-      ? `就绪 · ${h.sessions} 会话`
-      : `未就绪：${h.error || "未知原因"}`;
+      ? `就绪 ${h.sessions} 会话`
+      : `未就绪 ${h.error || "未知原因"}`;
     if (!h.ok) banner(`服务未就绪：${h.error}。请检查 .env 中的 DEEPSEEK_API_KEY`);
     return h.ok;
   } catch (e) {
@@ -317,13 +472,14 @@ function renderSessions() {
     return;
   }
   box.innerHTML = "";
-  for (const s of state.sessions) {
+  state.sessions.forEach((s, i) => {
     const row = el("div", "sess" + (s.session_id === state.current ? " active" : ""));
+    row.dataset.idx = String(state.sessions.length - i).padStart(3, "0");
     row.onclick = () => selectSession(s.session_id);
 
     const id = el("span", "id", s.session_id);
     const st = el("span", "st " + s.state, s.state);
-    const kill = el("button", "kill", "×");
+    const kill = el("button", "kill", "删除");
     kill.title = "删除会话";
     kill.onclick = async (ev) => {
       ev.stopPropagation();
@@ -331,7 +487,7 @@ function renderSessions() {
     };
     row.append(id, st, kill);
     box.appendChild(row);
-  }
+  });
 }
 
 async function createSession() {
@@ -400,7 +556,7 @@ function renderMessages(messages) {
 
 function appendUser(text, ts) {
   const wrap = el("div", "msg user");
-  const avatar = el("div", "avatar", "U");
+  const avatar = el("div", "avatar", "user");
   const body = el("div", "body");
   body.appendChild(el("div", "text", text));
   body.appendChild(el("div", "meta", ts ? fmtTime(ts) : ""));
@@ -412,12 +568,11 @@ function appendUser(text, ts) {
 function appendAssistant(text, final, toolCalls, ts) {
   if (!text && !toolCalls.length) return;
   const wrap = el("div", "msg assistant");
-  const avatar = el("div", "avatar", "A");
+  const avatar = el("div", "avatar", "agent");
   const body = el("div", "body");
   if (text) body.appendChild(el("div", "text", text));
-  const meta = el("div", "meta", final ? "final" : "reasoning");
-  if (ts) meta.textContent = `${final ? "final" : "reasoning"} · ${fmtTime(ts)}`;
-  body.appendChild(meta);
+  const label = final ? "final" : "reasoning";
+  body.appendChild(el("div", "meta", ts ? `${label} ${fmtTime(ts)}` : label));
   wrap.append(avatar, body);
   $("stream").appendChild(wrap);
   scrollBottom();
@@ -425,16 +580,19 @@ function appendAssistant(text, final, toolCalls, ts) {
 
 function appendToolCall(call) {
   const card = el("div", "tool-card");
-  card.appendChild(el("div", "path", "→ " + call.name));
-  const pre = el("pre", null, call.arguments || "");
-  card.appendChild(pre);
+  const head = el("div", "path");
+  head.append(el("span", null, call.name), el("span", "op", "call"));
+  card.appendChild(head);
+  card.appendChild(el("pre", "args", call.arguments || ""));
   $("stream").appendChild(card);
   scrollBottom();
 }
 
 function appendToolResult(path, content, isErr) {
   const card = el("div", "tool-card" + (isErr ? " err" : ""));
-  card.appendChild(el("div", "path" + (isErr ? " err" : ""), (isErr ? "✕ " : "✓ ") + path));
+  const head = el("div", "path" + (isErr ? " err" : ""));
+  head.append(el("span", null, path), el("span", "op", isErr ? "error" : "result"));
+  card.appendChild(head);
   card.appendChild(el("pre", null, (content || "").slice(0, 1200)));
   $("stream").appendChild(card);
   scrollBottom();
@@ -443,7 +601,7 @@ function appendToolResult(path, content, isErr) {
 function showThinking() {
   if ($("thinking")) return;
   const box = el("div", "msg assistant");
-  const avatar = el("div", "avatar", "A");
+  const avatar = el("div", "avatar", "agent");
   const body = el("div", "body");
   const t = el("div", "thinking");
   t.id = "thinking";
@@ -567,7 +725,7 @@ function renderTrace() {
       el("span", "t", fmtTime(item.ts)),
     );
     row.appendChild(head);
-    row.appendChild(el("div", null, summarize(item)));
+    row.appendChild(el("div", "sum", summarize(item)));
     box.appendChild(row);
   }
 }
@@ -578,17 +736,17 @@ function summarize(item) {
     case "assistant":
       return (p.content || p.text || "").slice(0, 90) || `tool_calls × ${(p.tool_calls || []).length}`;
     case "tool":
-      return `${p.path} · ${(p.preview || "").slice(0, 60)}`;
+      return `${p.path} ${(p.preview || "").slice(0, 60)}`;
     case "route":
-      return p.branch ? `→ ${p.branch} (${p.confidence})` : `回退全量 (${p.confidence})`;
+      return p.branch ? `分支 ${p.branch} 置信度 ${p.confidence}` : `回退全量 置信度 ${p.confidence}`;
     case "compress":
-      return `${p.action} · 剩余 ${p.messages} 条`;
+      return `${p.action} 剩余 ${p.messages} 条`;
     case "inject":
       return `[${p.channel}] ${(p.text || "").slice(0, 60)}`;
     case "usage":
       return `${p.tokens} / ${p.capacity} tokens`;
     case "state":
-      return `${p.state}${p.detail ? " · " + p.detail : ""}`;
+      return p.detail ? `${p.state} — ${p.detail}` : p.state;
     case "error":
       return p.message || "";
     default:
@@ -629,7 +787,7 @@ async function refreshContext() {
     }
     for (const m of data.messages) {
       const item = el("div", "ctx-item");
-      item.appendChild(el("div", "role", m.role + (m.name ? " · " + m.name : "")));
+      item.appendChild(el("div", "role", m.role + (m.name ? " / " + m.name : "")));
       item.appendChild(el("div", "c", m.content || (m.tool_calls ? `[${m.tool_calls.length} tool_calls]` : "")));
       box.appendChild(item);
     }
@@ -647,7 +805,7 @@ async function loadTools() {
     for (const t of data.tools) {
       const item = el("div", "ctx-item");
       item.appendChild(el("div", "role", t.path));
-      item.appendChild(el("div", "c", `${t.description} · ${t.concurrency}${t.idempotent ? " · 幂等" : ""}`));
+      item.appendChild(el("div", "c", `${t.description} / 并发 ${t.concurrency}${t.idempotent ? " / 幂等" : ""}`));
       box.appendChild(item);
     }
   } catch (e) {

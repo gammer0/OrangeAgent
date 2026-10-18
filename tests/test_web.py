@@ -90,7 +90,8 @@ class TestHealthAndStatic:
         response = client.get("/")
         assert response.status_code == 200
         assert "<!doctype html>" in response.text.lower()
-        assert "HARNESS" in response.text
+        # 品牌标识（CSS 用 text-transform 渲染为大写，标记本身可小写）
+        assert "harness" in response.text.lower()
 
     def test_health_ok(self, client: TestClient) -> None:
         payload = client.get("/api/health").json()
