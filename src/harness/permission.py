@@ -1,22 +1,24 @@
-"""权限模型（DAC）。
+"""Permission model (DAC).
 
-对应文档：``docs/02-数据结构设计/04-工具与权限.md`` §4.3。
+See ``docs/02-data-structures/04-tools-and-permissions.md`` §4.3.
 
-模型要点：
+Model highlights:
 
-* 单主体（agent）+ 三类资源（tool / skill / mcp），类比 Linux owner 位。
-* 授予粒度为**实例**：``grants`` 的键是资源绝对路径。
-* ``grants`` 只记例外项，**无记录视为允许**（B15）。
-* 判定只依赖 path，``side_effect_scope`` 不参与（B18）。
+* A single principal (the agent) plus three resource kinds (tool / skill / mcp),
+  analogous to Linux owner bits.
+* Grants are at **instance** granularity: keys in ``grants`` are absolute
+  resource paths.
+* ``grants`` stores exceptions only; **no record means allowed** (B15).
+* Decisions depend on the path only; ``side_effect_scope`` is not consulted (B18).
 
-约束归属：
+Constraint ownership:
 
 ===========  ==========================================================
-B5           可见性判定供 ``tree_index`` 与 ``tree_query`` 共用
-B15          ``is_allowed`` 对无记录路径返回 True
-B16          ``grants`` 的键必须是完整绝对路径，与 ``ToolNode.path`` 逐字符一致
-B17          ``Permission.src`` 必须与节点实际资源类型一致
-B18          权限判定不看 ``side_effect_scope``
+B5           The visibility check is shared by ``tree_index`` and ``tree_query``
+B15          ``is_allowed`` returns True for paths with no record
+B16          ``grants`` keys must be full absolute paths matching ``ToolNode.path`` exactly
+B17          ``Permission.src`` must match the node's actual resource kind
+B18          Permission decisions ignore ``side_effect_scope``
 ===========  ==========================================================
 """
 
@@ -40,68 +42,73 @@ __all__ = [
     "PermissionDenied",
 ]
 
-# 四类能力位：读 / 写 / 执行 / 网络
+# Four capability bits: read / write / exec / net
 CapName = Literal["read", "write", "exec", "net"]
 
-# 资源类型：决定对应哪个权限位（B17）
+# Resource kind: determines which permission bit applies (B17)
 ResourceKind = Literal["tool", "skill", "mcp"]
 
 RESOURCE_KINDS: frozenset[str] = frozenset({"tool", "skill", "mcp"})
 
-# 路径段：与 message.py 保持同一套字符集，避免两处定义漂移
+# Path segment charset shared with message.py so the two definitions cannot drift
 _PATH_SEGMENT = r"[A-Za-z0-9_\-.]+"
 _ABSOLUTE_PATH_RE = re.compile(rf"^/(?:{_PATH_SEGMENT})(?:/{_PATH_SEGMENT})*$")
 _HEAD_RE = re.compile(rf"^/({_PATH_SEGMENT})")
 
 
 def is_absolute_path(path: str) -> bool:
-    """判断是否为合法绝对路径（以 ``/`` 开头、至少一段、无空段）。
+    """Whether this is a valid absolute path (leading ``/``, at least one segment, no empties).
 
-    B16 要求 ``grants`` 的键是完整绝对路径，且与 ``ToolNode.path`` 逐字符一致；
-    本函数只做格式校验，逐字符一致性由 :meth:`check_src_matches_path` 之外的
-    查表方式保证（查表本身即逐字符匹配）。
+    B16 requires ``grants`` keys to be full absolute paths matching
+    ``ToolNode.path`` exactly. This function only validates the format;
+    character-exact consistency is guaranteed by how lookups are done (a dict
+    lookup is itself an exact match).
     """
     return isinstance(path, str) and bool(_ABSOLUTE_PATH_RE.match(path))
 
 
 def path_segments(path: str) -> list[str]:
-    """把绝对路径切分为段列表；``"/"`` 视为空列表。
+    """Split an absolute path into segments; ``"/"`` yields an empty list.
 
     Raises:
-        ValueError: 路径格式非法。
+        ValueError: The path format is invalid.
     """
     if path == "/":
         return []
     if not is_absolute_path(path):
-        raise ValueError(f"非法绝对路径: {path!r}")
+        raise ValueError(f"invalid absolute path: {path!r}")
     return path.strip("/").split("/")
 
 
 def path_head(path: str) -> str | None:
-    """返回路径首段（L1 资源层），非绝对路径返回 ``None``。"""
+    """Return the first segment (the L1 resource root); ``None`` if not absolute."""
     match = _HEAD_RE.match(path)
     return match.group(1) if match else None
 
 
 def check_src_matches_path(src: str, path: str) -> None:
-    """校验 ``Permission.src`` 与节点路径首段一致（B17）。
+    """Verify ``Permission.src`` matches the first segment of the node path (B17).
 
     Raises:
-        ValueError: 不一致或路径非法。
+        ValueError: Mismatch or invalid path.
     """
     head = path_head(path)
     if head is None:
-        raise ValueError(f"B16: 非法绝对路径 {path!r}")
+        raise ValueError(f"B16: invalid absolute path {path!r}")
     if head != src:
-        raise ValueError(f"B17: Permission.src={src!r} 与路径首段 {head!r} 不一致: {path!r}")
+        raise ValueError(
+            f"B17: Permission.src={src!r} does not match path head {head!r}: {path!r}"
+        )
 
 
 class Permission(BaseModel):
-    """节点声明的资源类型与能力位。
+    """Resource kind and capability bits declared by a node.
 
     Attributes:
-        src: 资源类型，决定对应权限位（tool→call、skill→read、mcp→request）。
-        caps: 能力位列表，用于并发推导（B11）、幂等标注与风险提示。
+        src: Resource kind; determines the permission bit (tool->call,
+            skill->read, mcp->request).
+        caps: Capability bits, used for concurrency inference (B11), idempotency
+            tagging and risk hints.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -113,17 +120,17 @@ class Permission(BaseModel):
     @classmethod
     def _caps_unique(cls, value: list[str]) -> list[str]:
         if len(set(value)) != len(value):
-            raise ValueError(f"caps 含重复项: {value}")
+            raise ValueError(f"caps contains duplicates: {value}")
         return value
 
     @property
     def permission_bit(self) -> str:
-        """本资源类型对应的权限位名称（文档 §4.3）。"""
+        """Permission bit name for this resource kind (design doc §4.3)."""
         return {"tool": "call", "skill": "read", "mcp": "request"}[self.src]
 
 
 class AgentIdentity(BaseModel):
-    """多 agent 预留：当前单实例，``role`` 恒为 ``owner``。"""
+    """Multi-agent placeholder: single instance for now, ``role`` is always ``owner``."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -132,10 +139,11 @@ class AgentIdentity(BaseModel):
 
 
 class AgentPermissions(BaseModel):
-    """按 agent 存的权限表，与共享树分离。
+    """Per-agent permission table, kept separate from the shared tree.
 
-    ``grants`` 的键是资源绝对路径，值是是否允许；**只记例外项**，
-    无记录视为允许（B15）。键每次查询都经过绝对路径校验（B16）。
+    Keys in ``grants`` are absolute resource paths and values are whether the
+    path is allowed; **exceptions only**, no record means allowed (B15). Every
+    key is validated as an absolute path (B16).
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -148,46 +156,49 @@ class AgentPermissions(BaseModel):
     def _keys_must_be_absolute(cls, value: dict[str, bool]) -> dict[str, bool]:
         for key in value:
             if not is_absolute_path(key):
-                raise ValueError(f"B16: grants 的键必须是完整绝对路径，实际为 {key!r}")
+                raise ValueError(f"B16: grants keys must be full absolute paths, got {key!r}")
         return value
 
-    # ---------------------------------------------------------------- 判定
+    # ------------------------------------------------------------ decisions
 
     def is_allowed(self, path: str) -> bool:
-        """判定某绝对路径是否允许。
+        """Whether this absolute path is allowed.
 
-        只做**精确路径**判定（B16：前缀不匹配、不做祖先继承）。子树隐藏语义
-        由 :func:`visible` 承担，供 ``build_tree`` / ``tree_index`` / ``tree_query``
-        共用（B5）。
+        Performs an **exact-path** decision only (B16: no prefix matching, no
+        ancestor inheritance). Subtree hiding is handled by :func:`visible`,
+        shared by ``build_tree`` / ``tree_index`` / ``tree_query`` (B5).
 
         Args:
-            path: 节点绝对路径（须与 ``ToolNode.path`` 逐字符一致，B16）。
+            path: Node absolute path (must match ``ToolNode.path`` exactly, B16).
 
         Returns:
-            ``True`` 表示允许：无记录默认允许（B15），有记录取记录值。
+            ``True`` if allowed: no record defaults to allowed (B15), otherwise
+            the recorded value.
 
         Raises:
-            ValueError: ``path`` 不是合法绝对路径（B16：禁止相对路径或前缀匹配）。
-
+            ValueError: ``path`` is not a valid absolute path (B16: relative
+                paths and prefix matching are forbidden).
         """
         if not is_absolute_path(path):
-            raise ValueError(f"B16: 权限判定只接受完整绝对路径，实际为 {path!r}")
+            raise ValueError(
+                f"B16: permission checks accept full absolute paths only, got {path!r}"
+            )
         return self.grants.get(path, True)
 
     def is_denied(self, path: str) -> bool:
-        """``is_allowed`` 的反面，便于阅读（B5）。"""
+        """The inverse of ``is_allowed``, for readability (B5)."""
         return not self.is_allowed(path)
 
     def grant(self, path: str, allowed: bool = True) -> AgentPermissions:
-        """返回记录了一条例外的新权限表（不可变对象，便于快照）。"""
+        """Return a new table recording one exception (immutable, snapshot-friendly)."""
         if not is_absolute_path(path):
-            raise ValueError(f"B16: grants 的键必须是完整绝对路径，实际为 {path!r}")
+            raise ValueError(f"B16: grants keys must be full absolute paths, got {path!r}")
         return AgentPermissions(
             agent_id=self.agent_id, grants={**self.grants, path: allowed}
         )
 
     def revoke(self, path: str) -> AgentPermissions:
-        """返回移除了该例外记录的新权限表。"""
+        """Return a new table with that exception record removed."""
         return AgentPermissions(
             agent_id=self.agent_id,
             grants={k: v for k, v in self.grants.items() if k != path},
@@ -195,14 +206,16 @@ class AgentPermissions(BaseModel):
 
 
 def visible(path: str, permissions: AgentPermissions) -> bool:
-    """可见性过滤器：``tree_index``、``tree_query``、``build_tree`` 共用。
+    """Visibility filter shared by ``tree_index``, ``tree_query`` and ``build_tree``.
 
-    被拒绝的节点不得出现在树索引与查询结果中（B5）；本函数只看 path
-    与 ``grants``，不看 ``side_effect_scope``（B18）。
+    Denied nodes must not appear in the tree index or query results (B5). This
+    function looks at the path and ``grants`` only, never at
+    ``side_effect_scope`` (B18).
 
-    祖先继承：**任一祖先被显式拒绝，则整棵子树不可见**（B5「拒绝中间节点
-    即隐藏整个子树」）。这与 :meth:`AgentPermissions.is_allowed` 的精确判定
-    分工不同：``is_allowed`` 只回答"这个 path 本身有没有记录"。
+    Ancestor inheritance: **if any ancestor is explicitly denied, the whole
+    subtree is invisible** (B5: "denying an intermediate node hides the entire
+    subtree"). This differs from :meth:`AgentPermissions.is_allowed`, which
+    answers only "does this exact path have a record".
     """
     segments = [seg for seg in path.split("/") if seg]
     for index in range(1, len(segments)):
@@ -213,9 +226,10 @@ def visible(path: str, permissions: AgentPermissions) -> bool:
 
 
 class PermissionDenied(Exception):
-    """``3a PermissionDenied``：直接调用被拒绝节点的错误。
+    """``3a PermissionDenied``: raised when calling a denied node directly.
 
-    对应文档 §4.3 表格右侧：查询时过滤、直接调用时返回 ``3a``（B5）。
+    Per design doc §4.3: filtered out at query time, ``3a`` when called
+    directly (B5).
     """
 
     error_type = "3a"

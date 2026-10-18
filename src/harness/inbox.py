@@ -1,21 +1,23 @@
-"""接入层双通道（G 组）。
+"""Ingress dual channel (group G).
 
-对应文档：docs/02-数据结构设计/01-接入层.md
+See docs/02-data-structures/01-ingress.md.
 
-结构层次::
+Structure::
 
     Inbox
-    ├── control: deque[InterruptRequest]   立即插入通道，容量无限
-    ├── chat: deque[UserInput]             等待插入通道，FIFO，容量上限 100
-    └── lock: threading.Lock               保护两通道读写
+    ├── control: deque[InterruptRequest]   immediate channel, unbounded
+    ├── chat: deque[UserInput]             pending channel, FIFO, capped at 100
+    └── lock: threading.Lock               guards both channels
 
-本模块只做**队列语义**，不实现 ``AgentLoop``：
+This module implements **queue semantics only** and does not implement
+``AgentLoop``:
 
-* 安全点的「消费什么」由调用方决定，这里只提供语义化的两个入口
-  ``drain_at_full_safe_point``（① / ③，G4）与
-  ``take_control_at_sub_batch``（②，G2）。
-* 丢弃通知通过注入的 ``on_drop`` 回调完成，避免对 ``trace`` 模块的硬依赖
-  （G8 / G12 要求写 ``TraceEvent``，由上层把 ``TraceEvent`` 写入逻辑注入进来）。
+* What a safe point consumes is decided by the caller; this module only offers
+  the two semantic entry points ``drain_at_full_safe_point`` (① / ③, G4) and
+  ``take_control_at_sub_batch`` (②, G2).
+* Drop notifications go through the injected ``on_drop`` callback, avoiding a
+  hard dependency on the ``trace`` module (G8 / G12 require writing a
+  ``TraceEvent``; the upper layer injects that writing logic here).
 """
 
 from __future__ import annotations
@@ -37,16 +39,16 @@ __all__ = [
     "Inbox",
 ]
 
-#: ``chat`` 通道容量上限（文档 §1.3）
+#: Capacity limit of the ``chat`` channel (design doc §1.3)
 CHAT_CAPACITY = 100
 
-#: ``reason`` 的三个合法取值（G11）
+#: The three legal values of ``reason`` (G11)
 INTERRUPT_REASONS: tuple[str, str, str] = ("user_abort", "session_end", "timeout")
 
-#: 入队丢弃原因：G8（超容量）/ G12（空文本）
+#: Enqueue drop reasons: G8 (overflow) / G12 (empty text)
 DropReason = Literal["overflow", "empty_text"]
 
-#: 丢弃通知回调签名。上层收到后写 ``TraceEvent``。
+#: Drop-notification callback signature. The upper layer writes a ``TraceEvent``.
 DropCallback = Callable[["DropNotice"], None]
 
 
@@ -56,12 +58,13 @@ def _now() -> float:
 
 @dataclass(frozen=True, slots=True)
 class UserInput:
-    """``chat`` 通道消息元素。
+    """An element of the ``chat`` channel.
 
     Attributes:
-        text: 原始文本，不做改写；必须非空（空串在 ``Inbox.put_chat`` 处被拒绝，G12）。
-        channel: 来源通道，``stdin``（终端）或 ``ws``（WebSocket）。
-        ts: 入队时刻 Unix 时间戳。
+        text: Raw text, never rewritten; must be non-empty (empty strings are
+            rejected in ``Inbox.put_chat``, G12).
+        channel: Source channel, ``stdin`` (terminal) or ``ws`` (WebSocket).
+        ts: Unix timestamp when enqueued.
     """
 
     text: str
@@ -71,18 +74,19 @@ class UserInput:
 
 @dataclass(frozen=True, slots=True)
 class InterruptRequest:
-    """``control`` 通道中断信号。
+    """An interrupt signal on the ``control`` channel.
 
-    不变量（G11）：
+    Invariants (G11):
 
-    * ``reason`` 只能取 ``user_abort`` / ``session_end`` / ``timeout``；
-    * 除 ``user_abort`` 外，``text`` 必须为 ``None``。
+    * ``reason`` may only be ``user_abort`` / ``session_end`` / ``timeout``;
+    * except for ``user_abort``, ``text`` must be ``None``.
 
     Attributes:
-        reason: 中断来源。``user_abort`` 由 ``Reader`` 写入，``session_end`` 由
-            ``StepController`` 写入，``timeout`` 由 ``Executor`` 写入。
-        text: 附带文本；非空时在全部补占位（3e）完成后作为 ``UserMsg`` 插入（G3）。
-        ts: 入队时刻 Unix 时间戳。
+        reason: Interrupt source. ``user_abort`` is written by ``Reader``,
+            ``session_end`` by ``StepController``, ``timeout`` by ``Executor``.
+        text: Attached text; when non-empty it is inserted as a ``UserMsg``
+            after all placeholders are backfilled (3e) (G3).
+        ts: Unix timestamp when enqueued.
     """
 
     reason: Literal["user_abort", "session_end", "timeout"]
@@ -90,25 +94,30 @@ class InterruptRequest:
     ts: float = field(default_factory=_now)
 
     def __post_init__(self) -> None:
-        # 运行期双保险：Literal 只对静态检查生效，绕过类型检查的调用也要拦住。
+        # Runtime belt-and-braces: Literal only affects static checking, but
+        # calls that bypass type checking must be rejected too.
         if self.reason not in INTERRUPT_REASONS:
-            raise ValueError(f"G11: reason 只能取 {INTERRUPT_REASONS}，实际为 {self.reason!r}")
+            raise ValueError(
+                f"G11: reason must be one of {INTERRUPT_REASONS}, got {self.reason!r}"
+            )
         if self.reason != "user_abort" and self.text is not None:
             raise ValueError(
-                f"G11: reason={self.reason!r} 时 text 必须为 None，实际为 {self.text!r}"
+                f"G11: text must be None when reason={self.reason!r}, got {self.text!r}"
             )
 
 
 @dataclass(frozen=True, slots=True)
 class DropNotice:
-    """一次入队丢弃的通知内容，供上层构造 ``TraceEvent``。
+    """Notification of one dropped enqueue, for the upper layer to build a ``TraceEvent``.
 
     Attributes:
-        channel: 被丢弃消息所属通道，恒为 ``"chat"``（``control`` 无容量上限）。
-        reason: ``overflow``（G8）或 ``empty_text``（G12）。
-        dropped: 被丢弃的元素；``empty_text`` 时 ``None``。
-        text: 被丢弃消息的文本；``empty_text`` 时为原始空文本。
-        ts: 丢弃发生时刻。
+        channel: Channel of the dropped message; always ``"chat"`` (``control``
+            is unbounded).
+        reason: ``overflow`` (G8) or ``empty_text`` (G12).
+        dropped: The dropped element; ``None`` for ``empty_text``.
+        text: Text of the dropped message; the original empty text for
+            ``empty_text``.
+        ts: Time the drop happened.
     """
 
     channel: Literal["chat"]
@@ -119,13 +128,15 @@ class DropNotice:
 
 
 class Inbox:
-    """会话级双通道收件箱。
+    """Session-level dual-channel inbox.
 
-    线程模型（G5 / G6）：
+    Threading model (G5 / G6):
 
-    * 写入方可为多个（``Reader`` / ``StepController`` / ``Executor``），全部持 ``lock``；
-    * 消费方仅主线程，同样持 ``lock``；
-    * 临界区**只做队列操作**，不得在锁内调用工具或模型。
+    * Writers may be multiple (``Reader`` / ``StepController`` / ``Executor``);
+      all hold ``lock``.
+    * The consumer is the main thread only, and also holds ``lock``.
+    * Critical sections **only touch queues**; never call tools or the model
+      while holding the lock.
     """
 
     def __init__(
@@ -133,12 +144,13 @@ class Inbox:
         capacity: int = CHAT_CAPACITY,
         on_drop: DropCallback | None = None,
     ) -> None:
-        """初始化空收件箱。
+        """Create an empty inbox.
 
         Args:
-            capacity: ``chat`` 通道容量上限，默认 100。
-            on_drop: 丢弃通知回调（G8 / G12）。回调在**锁外**调用，避免上层
-                写 ``TraceEvent`` 的 IO 阻塞写入方。
+            capacity: Capacity limit of the ``chat`` channel, default 100.
+            on_drop: Drop-notification callback (G8 / G12). Invoked **outside**
+                the lock so that the upper layer's ``TraceEvent`` IO cannot
+                block writers.
         """
         self._control: deque[InterruptRequest] = deque()
         self._chat: deque[UserInput] = deque()
@@ -147,21 +159,21 @@ class Inbox:
         self._on_drop = on_drop
 
     # ------------------------------------------------------------------
-    # 只读观测（持锁，供注册表卸载判定使用）
+    # Read-only observation (locked; used by the registry eviction check)
     # ------------------------------------------------------------------
 
     @property
     def capacity(self) -> int:
-        """``chat`` 通道容量上限。"""
+        """Capacity limit of the ``chat`` channel."""
         return self._capacity
 
     def is_empty(self) -> bool:
-        """两通道是否均为空（持锁）。"""
+        """Whether both channels are empty (locked)."""
         with self._lock:
             return not self._control and not self._chat
 
     def __len__(self) -> int:
-        """两通道元素总数（持锁）。"""
+        """Total number of elements across both channels (locked)."""
         with self._lock:
             return len(self._control) + len(self._chat)
 
@@ -170,19 +182,20 @@ class Inbox:
             return f"Inbox(control={len(self._control)}, chat={len(self._chat)})"
 
     # ------------------------------------------------------------------
-    # 写入
+    # Writing
     # ------------------------------------------------------------------
 
     def put_chat(self, item: UserInput) -> bool:
-        """写入 ``chat`` 通道（FIFO）。
+        """Write to the ``chat`` channel (FIFO).
 
-        空文本拒绝入队并通知（G12）；超容量丢弃最旧元素并通知（G8）。
+        Empty text is rejected and notified (G12); when over capacity the
+        oldest element is dropped and notified (G8).
 
         Args:
-            item: 用户输入。
+            item: User input.
 
         Returns:
-            是否成功入队。
+            Whether the item was enqueued.
         """
         notice: DropNotice | None = None
         accepted = True
@@ -205,19 +218,19 @@ class Inbox:
         return accepted
 
     def put_control(self, item: InterruptRequest) -> None:
-        """写入 ``control`` 通道（容量无限）。"""
+        """Write to the ``control`` channel (unbounded)."""
         with self._lock:
             self._control.append(item)
 
     # ------------------------------------------------------------------
-    # 消费
+    # Consuming
     # ------------------------------------------------------------------
 
     def take_control(self) -> InterruptRequest | None:
-        """取走首个 ``control`` 信号并清空剩余（G7）。
+        """Take the first ``control`` signal and clear the rest (G7).
 
         Returns:
-            首个信号；通道为空时返回 ``None``。
+            The first signal, or ``None`` when the channel is empty.
         """
         with self._lock:
             if not self._control:
@@ -227,39 +240,41 @@ class Inbox:
             return first
 
     def drain_chat(self) -> list[UserInput]:
-        """取走全部 ``chat`` 消息，保持 FIFO 顺序。"""
+        """Take every ``chat`` message, preserving FIFO order."""
         with self._lock:
             items = list(self._chat)
             self._chat.clear()
             return items
 
     # ------------------------------------------------------------------
-    # 安全点语义封装（不实现 AgentLoop）
+    # Safe-point semantic wrappers (no AgentLoop implementation)
     # ------------------------------------------------------------------
 
     def drain_at_full_safe_point(self) -> tuple[InterruptRequest | None, list[UserInput]]:
-        """① LLM 返回后 / ③ 全批完成的完整安全点消费（G4）。
+        """Full safe-point consumption ① after the LLM returns / ③ after the whole batch (G4).
 
-        两通道均有消息时，先处理 ``control``，再 ``drain`` ``chat``。
+        When both channels have messages, ``control`` is handled first, then
+        ``chat`` is drained.
 
         Returns:
-            ``(control 信号或 None, 全部 chat 消息)``。
+            ``(control signal or None, all chat messages)``.
         """
         interrupt = self.take_control()
         return interrupt, self.drain_chat()
 
     def take_control_at_sub_batch(self) -> InterruptRequest | None:
-        """② 组间子批次安全点消费（G2）。
+        """Sub-batch safe point between groups ② (G2).
 
-        只取 ``control``；``chat`` 消息留在队列中，既不出队也不丢弃。
+        Takes ``control`` only; ``chat`` messages stay queued, neither consumed
+        nor dropped.
         """
         return self.take_control()
 
     # ------------------------------------------------------------------
-    # 内部
+    # Internals
     # ------------------------------------------------------------------
 
     def _emit(self, notice: DropNotice | None) -> None:
-        """在锁外投递丢弃通知。"""
+        """Deliver the drop notification outside the lock."""
         if notice is not None and self._on_drop is not None:
             self._on_drop(notice)
