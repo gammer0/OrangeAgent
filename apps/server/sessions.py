@@ -246,7 +246,10 @@ class SessionRunner:
     _timestamps: dict[int, float] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        self.assembler = ContextAssembler(capacity=self.capacity)
+        self.assembler = ContextAssembler(
+            capacity=self.capacity,
+            summarizer=self._summarize,
+        )
         self.system = self.assembler.build_system(
             SystemPromptParts(
                 tool_index=self.tools.tree.tree_index(depth=2),
@@ -255,6 +258,38 @@ class SessionRunner:
             )
         )
         self.messages = [self.system]
+
+    # ------------------------------------------------------------ 摘要
+
+    #: 摘要请求的输入上限（字符）。超出时先本地截断，避免摘要调用本身超限。
+    SUMMARY_INPUT_CHARS = 24_000
+
+    def _summarize(self, text: str) -> str:
+        """无上下文单轮摘要：把一段被压缩的历史折叠成要点。
+
+        与主循环共享 ``proxy``，但用独立 ``session_id`` 后缀，避免污染主会话
+        的用量归集；**不传 tools**，模型只能回文本，不会再次触发工具调用。
+        """
+        from harness.message import SystemMsg, UserMsg
+
+        payload = text[: self.SUMMARY_INPUT_CHARS]
+        response = self.proxy.chat(
+            [
+                SystemMsg(
+                    content=(
+                        "你是上下文压缩器。把给定对话历史压缩成可继续工作的要点。"
+                        "保留：已完成的改动、文件路径、关键决定、未完成事项、踩过的坑。"
+                        "丢弃：重复的工具输出、被截断的大段代码、寒暄。"
+                        "只输出要点列表，不要解释你在做什么。"
+                    )
+                ),
+                UserMsg(content=payload),
+            ],
+            session_id=f"{self.session_id}:summary",
+            model=self.model,
+        )
+        summary = (response.message.content or "").strip()
+        return summary or "[摘要生成失败，原样保留]"
 
     # ------------------------------------------------------------ 事件
 
@@ -543,11 +578,12 @@ class SessionManager:
 
     @property
     def compress_available(self) -> bool:
-        """C3 压缩是否可用（各会话均未注入摘要器，恒为 False）。
+        """C3 压缩是否可用。
 
-        在 ``/api/health`` 暴露，避免"压缩从未发生"这种静默退化被忽略。
+        摘要器由 ``SessionRunner`` 提供（无上下文单轮调用），因此恒为 True；
+        保留该属性是为了让 ``/api/health`` 有一个稳定的观测点。
         """
-        return False
+        return True
 
     def load_capabilities(self, workdir: str) -> None:
         """按 ``.agent/capabilities.json`` 覆盖工具树；失败时保留演示工具。
