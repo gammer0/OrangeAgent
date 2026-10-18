@@ -106,16 +106,23 @@ class TestEachLevelOnceOnly:
         """I5：每个水位只触发一次。"""
         wm = Watermark(capacity=CAPACITY)
         first = judge([], CAPACITY, watermark=wm, estimate=5000)
-        second = judge([], CAPACITY, watermark=wm, estimate=5500)
         assert first.action == "compress_1"
+        wm.mark_compressed(first.level)  # 模拟执行压缩的调用方记账
+        second = judge([], CAPACITY, watermark=wm, estimate=5500)
         assert second.action == "normal"
         assert wm.compressed_at == {50}
 
     def test_auto2_then_back_down_still_allows_auto1(self) -> None:
         """I5：跳过 50% 直接到 75% 后，50% 水位仍未触发，回落到 50%–75% 时补触发一次。"""
         wm = Watermark(capacity=CAPACITY)
-        assert judge([], CAPACITY, watermark=wm, estimate=8000).action == "compress_2"
-        assert judge([], CAPACITY, watermark=wm, estimate=6000).action == "compress_1"
+        first = judge([], CAPACITY, watermark=wm, estimate=8000)
+        assert first.action == "compress_2"
+        wm.mark_compressed(first.level)  # 模拟执行压缩的调用方记账
+
+        second = judge([], CAPACITY, watermark=wm, estimate=6000)
+        assert second.action == "compress_1"
+        wm.mark_compressed(second.level)
+
         assert judge([], CAPACITY, watermark=wm, estimate=6000).action == "normal"
         assert wm.compressed_at == {50, 75}
 
@@ -130,7 +137,11 @@ class TestEachLevelOnceOnly:
             (9000, "session_end"),
         ]
         for estimate, expected in sequence:
-            assert judge([], CAPACITY, watermark=wm, estimate=estimate).action == expected
+            result = judge([], CAPACITY, watermark=wm, estimate=estimate)
+            assert result.action == expected
+            # judge 只判定；记账由执行压缩的调用方（compressor.compress）完成
+            if result.level is not None:
+                wm.mark_compressed(result.level)
         assert wm.compressed_at == {50, 75}
 
     def test_watermark_records_last_estimate(self) -> None:

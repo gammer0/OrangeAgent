@@ -159,8 +159,9 @@ def judge(
     Args:
         messages: 当前会话消息列表。
         capacity: 模型上下文上限。
-        watermark: 水位记录；传入时会**就地**更新 ``last_estimate``，并在返回
-            ``compress_1`` / ``compress_2`` 时把对应水位写入 ``compressed_at``。
+        watermark: 水位记录；传入时会就地更新 ``last_estimate``。
+            **不负责记账**：``compressed_at`` 由 ``compressor.compress()``
+            在压缩真正发生后写入，保证"判定"与"执行"解耦。
             不传则视为无状态判定（每个水位都会触发）。
         estimate: 已算好的 token 估算值；省略时按 ``messages`` 现算。
 
@@ -180,10 +181,9 @@ def judge(
         watermark.update_estimate(estimate) if watermark is not None else estimate / capacity
     )
 
-    result = _decide(ratio, watermark)
-    if watermark is not None and result.level is not None:
-        watermark.mark_compressed(result.level)
-    return result
+    # ponytail: 这里**只判定不记账**。记账交给真正执行压缩的 compress()——
+    # 否则 compress() 的 I5 重复触发检查会立刻失败，压缩永远不生效。
+    return _decide(ratio, watermark)
 
 
 def _decide(ratio: float, watermark: Watermark | None) -> JudgeResult:

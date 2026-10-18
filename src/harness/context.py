@@ -252,6 +252,8 @@ class ContextAssembler:
             )
 
         level = 50 if action == "compress_1" else 75
+        # ponytail: 两个 keep 字段默认 None，传 None 给 compress 才会走
+        # default_keep_records()；显式算默认值会导致"保留全部记录、无可压缩"。
         keep = self.keep_records_50 if level == 50 else self.keep_records_75
 
         try:
@@ -262,8 +264,10 @@ class ContextAssembler:
                 keep_records=keep,
                 watermark=self.watermark,
             )
-        except ValueError:
+        except ValueError as exc:
             # 水位已记账或记录不足以切分：无损退化，不阻断主流程（I4）
+            # ponytail: 保留原因，避免"压缩静默失败"再次不可观测。
+            self.last_compress_error = str(exc)
             return AssembleResult(
                 messages=history,
                 system=_system_of(history),
@@ -275,11 +279,14 @@ class ContextAssembler:
         if clear_trace_state is not None:
             clear_trace_state()
 
+        # ponytail: compress() 在"记录不足以切分"时会原样返回同一个列表，
+        # 此时不能报 compressed=True——否则上层以为压了，实际没压。
+        actually_compressed = compressed_messages is not history
         return AssembleResult(
             messages=compressed_messages,
             system=_system_of(compressed_messages),
             judged=judged,
-            compressed=True,
+            compressed=actually_compressed,
             action=action,
         )
 
