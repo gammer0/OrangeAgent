@@ -654,10 +654,23 @@ def _cmd_mcp_add(args: argparse.Namespace) -> int:
     from harness.mcp_client import McpError, McpServerConfig, list_tools
 
     workdir = args.workdir
+
+    # 参数来源合并：--arg 逐个给，--args-file 从文件按行读（处理大量 -- 开头的参数）
+    server_args: list[str] = list(args.arg or ())
+    if args.args_file:
+        try:
+            # utf-8-sig：Windows 上 PowerShell 的 Out-File 默认写 BOM，
+            # 不剥离会让第一个参数带上 \ufeff，服务器因此找不到脚本。
+            lines = Path(args.args_file).read_text(encoding="utf-8-sig").splitlines()
+        except OSError as exc:
+            print(f"无法读取参数文件: {exc}", file=sys.stderr)
+            return 2
+        server_args.extend(line for line in (ln.strip() for ln in lines) if line)
+
     config = McpServerConfig(
         name=args.name,
         command=args.command,
-        args=tuple(args.arg or ()),
+        args=tuple(server_args),
         env=tuple(
             tuple(item.split("=", 1)) for item in (args.env or []) if "=" in item
         ),
@@ -842,7 +855,7 @@ def _cmd_perms_grant(args: argparse.Namespace) -> int:
 
 def _cmd_perms_show(args: argparse.Namespace) -> int:
     """``harness perms show``：查某路径的实际判定结果。"""
-    from harness.permission import AgentPermissions, visible
+    from harness.permission import visible
     from harness.permission_store import load_permissions
 
     workdir = args.workdir
@@ -1305,8 +1318,21 @@ def build_parser() -> argparse.ArgumentParser:
     _add_common_options(mcp_add)
     mcp_add.add_argument("name", help="服务器名（同时作为 /mcp/<名> 分组）")
     mcp_add.add_argument("--command", required=True, help="可执行文件，如 npx")
-    mcp_add.add_argument("--arg", action="append", default=None, help="命令参数，可重复")
+    mcp_add.add_argument(
+        "--arg",
+        action="append",
+        default=None,
+        help=(
+            "命令参数，可重复。需要传入以 -- 开头的值（如 --root）时，"
+            "写成 --arg=--root，否则 argparse 会把它当成新选项"
+        ),
+    )
     mcp_add.add_argument("--env", action="append", default=None, help="K=V，可重复")
+    mcp_add.add_argument(
+        "--args-file",
+        default=None,
+        help="从文件读取参数：每行一个（可避免大量 -- 开头的参数难以书写）",
+    )
     mcp_add.set_defaults(func=_cmd_mcp_add)
 
     mcp_list = mcp_sub.add_parser("list", help="列出 MCP 服务器")

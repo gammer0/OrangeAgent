@@ -4,6 +4,151 @@
   "groups": [],
   "tools": [
     {
+      "path": "/mcp/workspace/list_dir",
+      "description": "列出目录内容",
+      "caps": [
+        "exec"
+      ],
+      "idempotent": false,
+      "builtin": "",
+      "source": {
+        "kind": "mcp",
+        "target": "workspace",
+        "callable": "list_dir"
+      },
+      "schema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "default": ".",
+            "description": "相对路径"
+          }
+        },
+        "required": []
+      }
+    },
+    {
+      "path": "/mcp/workspace/read_file",
+      "description": "按行读取文本文件",
+      "caps": [
+        "exec"
+      ],
+      "idempotent": false,
+      "builtin": "",
+      "source": {
+        "kind": "mcp",
+        "target": "workspace",
+        "callable": "read_file"
+      },
+      "schema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "offset": {
+            "type": "integer",
+            "default": 0
+          },
+          "limit": {
+            "type": "integer",
+            "default": 400
+          }
+        },
+        "required": [
+          "path"
+        ]
+      }
+    },
+    {
+      "path": "/mcp/workspace/search_text",
+      "description": "在文件中搜索文本",
+      "caps": [
+        "exec"
+      ],
+      "idempotent": false,
+      "builtin": "",
+      "source": {
+        "kind": "mcp",
+        "target": "workspace",
+        "callable": "search_text"
+      },
+      "schema": {
+        "type": "object",
+        "properties": {
+          "needle": {
+            "type": "string"
+          },
+          "pattern": {
+            "type": "string",
+            "default": "*.py"
+          },
+          "max_hits": {
+            "type": "integer",
+            "default": 50
+          }
+        },
+        "required": [
+          "needle"
+        ]
+      }
+    },
+    {
+      "path": "/mcp/workspace/stat_path",
+      "description": "查询路径元信息（含文件 sha256）",
+      "caps": [
+        "exec"
+      ],
+      "idempotent": false,
+      "builtin": "",
+      "source": {
+        "kind": "mcp",
+        "target": "workspace",
+        "callable": "stat_path"
+      },
+      "schema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ]
+      }
+    },
+    {
+      "path": "/mcp/workspace/write_file",
+      "description": "写入文本文件（覆盖）",
+      "caps": [
+        "exec"
+      ],
+      "idempotent": false,
+      "builtin": "",
+      "source": {
+        "kind": "mcp",
+        "target": "workspace",
+        "callable": "write_file"
+      },
+      "schema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "content": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "content"
+        ]
+      }
+    },
+    {
       "path": "/tool/net/http/get",
       "description": "HTTP GET，返回状态/类型/正文（截断）",
       "caps": [
@@ -209,5 +354,15 @@
       "group": ""
     }
   ],
-  "mcp_servers": []
+  "mcp_servers": [
+    {
+      "name": "workspace",
+      "command": ".venv\\Scripts\\python.exe",
+      "args": [
+        "mcp_servers\\workspace_server.py",
+        "--root",
+        "."
+      ]
+    }
+  ]
 }
