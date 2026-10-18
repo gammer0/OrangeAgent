@@ -87,11 +87,21 @@ class AssistantMsg(_Base):
     role: Literal["assistant"] = "assistant"
     content: str | None = None
     tool_calls: list[ToolCall] = Field(default_factory=list)
+    #: 思考型模型的推理过程（DeepSeek ``reasoning_content``）。
+    #: ponytail: 该字段**必须原样回传**给供应商，否则同一会话后续请求会 400
+    #: （"reasoning_content in the thinking mode must be passed back"）。
+    #: 它不参与历史语义，也不进入展示，只做透传。
+    reasoning_content: str | None = None
 
     @property
     def is_final(self) -> bool:
-        """是否为本轮最终答案：``tool_calls`` 为空即最终。"""
-        return len(self.tool_calls) == 0
+        """是否为本轮最终答案。
+
+        ponytail: 必须同时要求 ``content`` 非空白。只判 ``tool_calls`` 为空
+        会把模型的空回复（``content=""`` + 无调用）误认为「已完成」，
+        导致任务被静默截断——实测出现过写了一半就退出、理由为空的情况。
+        """
+        return not self.tool_calls and bool((self.content or "").strip())
 
     @model_validator(mode="after")
     def _check_content_or_calls(self) -> AssistantMsg:
@@ -197,6 +207,9 @@ def to_provider(
             projected.append({"role": msg.role, "content": msg.content})
         elif isinstance(msg, AssistantMsg):
             item: dict[str, object] = {"role": "assistant", "content": msg.content}
+            # ponytail: 仅在存在时回传，保证无推理内容的供应商请求体逐字节不变
+            if msg.reasoning_content:
+                item["reasoning_content"] = msg.reasoning_content
             if msg.tool_calls:
                 item["tool_calls"] = [
                     {

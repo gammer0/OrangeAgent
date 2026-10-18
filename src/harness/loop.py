@@ -59,6 +59,9 @@ MAX_STEPS = 40
 MAX_INJECTS = 10
 #: 连续失败次数达到该值且未换工具路径即判定死锁（文档 §4.9）。
 DEADLOCK_THRESHOLD = 3
+#: 连续空回复（无文本、无工具调用）达到该次数即中止。
+#: ponytail: 空回复既不能当最终答案（静默截断任务），也不能继续空转。
+EMPTY_RESPONSE_THRESHOLD = 2
 
 
 class ModelClient(Protocol):
@@ -270,6 +273,9 @@ class AgentLoop:
         self.max_workers = max_workers
         #: 可选上下文装配器；不传则按朴素实现直接调用模型（I4 无损退化）。
         self.assembler = assembler
+        #: 连续空回复计数（无文本、无工具调用），见 EMPTY_RESPONSE_THRESHOLD。
+        self._empty_responses = 0
+        self.empty_response_threshold = EMPTY_RESPONSE_THRESHOLD
         #: 可选 Jev 路由器；不传则不路由（等价全量暴露）。
         self.router = router
         #: 候选一级分支获取器；与 ``router`` 配对使用。
@@ -316,6 +322,18 @@ class AgentLoop:
             if assistant.is_final:
                 final_text = assistant.content
                 break
+
+            # ---- 空回复：既无 tool_calls 也无文本 ----
+            # ponytail: 模型偶尔返回 content="" + 无调用。既不能当最终答案
+            # （会静默截断任务），也不能继续 plan_batch（空计划空转）。
+            # 记一次失败，连续 empty_response_threshold 次则中止。
+            if not assistant.tool_calls:
+                self._empty_responses += 1
+                if self._empty_responses >= self.empty_response_threshold:
+                    self.controller.mark_stop("empty_response")
+                    break
+                continue
+            self._empty_responses = 0
 
             # ---- Jev 路由（优化路径，失败即全量，I4）----
             self._maybe_route(messages)

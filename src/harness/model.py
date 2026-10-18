@@ -217,6 +217,9 @@ class OpenAIAdapter:
         message = AssistantMsg(
             content=content if content is not None else (None if tool_calls else ""),
             tool_calls=tool_calls,
+            # ponytail: DeepSeek 思考模式要求把 reasoning_content 原样回传，
+            # 丢弃会导致同一会话后续请求 400。
+            reasoning_content=raw.get("reasoning_content"),
         )
 
         usage = payload.get("usage") or {}

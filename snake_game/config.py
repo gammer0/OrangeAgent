@@ -1,49 +1,36 @@
-"""贪吃蛇游戏的常量配置（纯常量，无副作用）。
+"""贪吃蛇常量配置：棋盘尺寸、速度曲线、终端字符与颜色。
 
-只放常量与颜色，不放逻辑，方便被 game.py / main.py 共用。
+本模块只放常量，不参与任何逻辑判断，便于统一调参。
 """
 
-from __future__ import annotations
-
-# --- 棋盘与初始状态 -------------------------------------------------------
+# ---- 棋盘 ----
 WIDTH = 20          # 棋盘宽（格）
 HEIGHT = 20         # 棋盘高（格）
-MIN_SIZE = 6        # 允许的最小边长（要放得下 3 节蛇）
-INITIAL_LENGTH = 3  # 初始蛇长
 
-# --- 速度（固定时间步，单位：步/秒） --------------------------------------
-INITIAL_SPS = 10.0      # 初始速度
-MAX_SPS = 22.0          # 速度上限
-SPS_PER_FOOD = 0.6      # 每吃 1 个食物提升的步/秒
-MIN_FRAME_SLEEP = 0.002  # 主循环最小休眠，避免空转占满 CPU
+# ---- 蛇 ----
+START_LENGTH = 3    # 初始蛇长
 
-# --- 渲染字符 -------------------------------------------------------------
-CH_HEAD = "@"
-CH_BODY = "o"
-CH_FOOD = "*"
-CH_EMPTY = " "
-BORDER_H = "-"
-BORDER_V = "|"
-BORDER_CORNER = "+"
-CELL_WIDTH = 1
+# ---- 固定时间步（秒/步）----
+BASE_TICK = 0.12    # 初始 0.12 秒/步，约 8.3 步/秒
+TICK_DECREASE = 0.004   # 每吃一个食物减少的时间
+MIN_TICK = 0.045    # 加速下限，约 22 步/秒
 
-# --- 颜色（ANSI 转义） ----------------------------------------------------
+# ---- 输入 ----
+MAX_PENDING_MOVES = 2   # 一帧内最多缓存 2 次转向
+
+# ---- 终端字符 ----
+GLYPH_HEAD = "@"
+GLYPH_BODY = "o"
+GLYPH_FOOD = "*"
+GLYPH_EMPTY = " "
+
+# ---- ANSI 颜色 ----
 COLOR_RESET = "\x1b[0m"
-COLOR_BORDER = "\x1b[90m"
 COLOR_HEAD = "\x1b[92m"
 COLOR_BODY = "\x1b[32m"
 COLOR_FOOD = "\x1b[91m"
 COLOR_TEXT = "\x1b[97m"
-COLOR_OVER = "\x1b[91m"
-COLOR_WIN = "\x1b[93m"
+COLOR_WARN = "\x1b[93m"
 
-# --- 按键 -----------------------------------------------------------------
-KEYS_QUIT = ("q", "Q")
-KEYS_PAUSE = ("p", "P")
-KEYS_RESTART = ("r", "R")
-DIRECTION_KEYS = {
-    "w": "up", "W": "up", "up": "up",
-    "s": "down", "S": "down", "down": "down",
-    "a": "left", "A": "left", "left": "left",
-    "d": "right", "D": "right", "right": "right",
-}
+# ---- 无头自检 ----
+DEFAULT_HEADLESS_STEPS = 100
