@@ -172,11 +172,18 @@ def create_app(workdir: str | Path | None = None) -> FastAPI:
     @app.get("/api/health")
     async def health() -> dict[str, Any]:
         """服务健康状态。"""
+        manager = state.manager
         return {
-            "ok": state.manager is not None,
+            "ok": manager is not None,
             "workdir": str(state.workdir),
-            "sessions": len(state.manager.list()) if state.manager else 0,
+            "sessions": len(manager.list()) if manager else 0,
             "error": state.error,
+            "tools": len(manager.tools.store.active_paths()) if manager else 0,
+            "skills": len(manager.capabilities.skills) if manager and manager.capabilities else 0,
+            "capability_error": manager.capability_error if manager else None,
+            "capability_file": str(
+                state.workdir / ".agent" / "capabilities.json"
+            ),
         }
 
     @app.get("/api/models")

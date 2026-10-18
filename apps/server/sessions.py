@@ -34,6 +34,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from harness.context import ContextAssembler, SystemPromptParts
+from harness.capabilities import CapabilityError, CapabilityManifest, load_manifest
 from harness.executor import execute_batch
 from harness.inbox import Inbox
 from harness.jev import JevRouter
@@ -534,8 +535,33 @@ class SessionManager:
         self.capacity = capacity
         self.max_sessions = max_sessions
         self.tools = DemoToolRegistry(workdir)
+        self.capabilities: CapabilityManifest | None = None
+        self.capability_error: str | None = None
+        self.load_capabilities(workdir)
         self._sessions: dict[str, SessionRunner] = {}
         self._lock = threading.Lock()
+
+    def load_capabilities(self, workdir: str) -> None:
+        """按 ``.agent/capabilities.json`` 覆盖工具树；失败时保留演示工具。
+
+        清单是**运维面**：装载失败不应让服务起不来，因此错误只记录在
+        ``capability_error``，由 ``/api/health`` 暴露给前端。
+        """
+        try:
+            manifest = load_manifest(workdir)
+        except CapabilityError as exc:
+            self.capabilities = None
+            self.capability_error = str(exc)
+            return
+
+        store = FlatStore()
+        for entry in manifest.to_tooldefs(workdir):
+            store.put(entry)
+        self.tools = DemoToolRegistry(workdir)
+        self.tools.store = store
+        self.tools.tree = build_tree(store, AgentPermissions(agent_id="web"))
+        self.capabilities = manifest
+        self.capability_error = None
 
     def create(self, *, model: str | None = None, capacity: int | None = None) -> SessionRunner:
         """创建新会话。"""
