@@ -255,6 +255,8 @@ class HarnessService:
                     sweep_interval_s=DEFAULT_SESSIONS.sweep_interval_s,
                 )
             )
+            # S2：启动后台周期清扫，否则空闲会话永不回收
+            self.registry.start_sweeper()
         except Exception as exc:  # noqa: BLE001
             self.problems.append(f"session-registry: {exc}")
             self.registry = None
@@ -413,6 +415,11 @@ class HarnessService:
 
     def close(self) -> None:
         """释放持久化连接（幂等）。"""
+        if self.registry is not None:
+            try:
+                self.registry.stop_sweeper()
+            except Exception as exc:  # noqa: BLE001
+                self.problems.append(f"close-sweeper: {exc}")
         if self.store is not None:
             try:
                 self.store.close()

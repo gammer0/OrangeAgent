@@ -224,7 +224,8 @@ class TestEviction:
         for s in (oldest, middle, newest):
             registry.add(s)
 
-        evicted = registry.sweep()
+        # 注入 now，避免触发空闲超时规则（本用例只验证容量溢出的 LRU 顺序）
+        evicted = registry.sweep(now=3.0)
 
         assert evicted == ["oldest"]
         assert registry.session_ids() == ["middle", "newest"]
@@ -255,7 +256,7 @@ class TestEviction:
         )
         registry.add(_session("new", status="active"))
 
-        assert registry.sweep() == ["victim"]
+        assert registry.sweep(now=0.5) == ["victim"]
         assert registry.get("victim") is None
 
         # 卸载仅丢内存对象，数据库记录仍在（H13），可重建（H14）
@@ -326,3 +327,132 @@ def test_eviction_policy_defaults() -> None:
 def test_status_literal_accepts_documented_values(status: str) -> None:
     session = _session(status=status)
     assert session.status == status
+
+
+class TestIdleTimeoutEviction:
+    """S1：空闲超时必须能独立触发卸载（与容量无关）。"""
+
+    def test_idle_beyond_timeout_evicted_even_under_limit(self) -> None:
+        registry = SessionRegistry(
+            policy=EvictionPolicy(max_resident=100, idle_timeout_s=60)
+        )
+        stale = _session("stale")
+        stale.last_activity = 1000.0
+        fresh = _session("fresh")
+        fresh.last_activity = 1090.0
+        registry.add(stale)
+        registry.add(fresh)
+
+        evicted = registry.sweep(now=1100.0)
+
+        assert evicted == ["stale"]
+        assert registry.get("stale") is None
+        assert registry.get("fresh") is fresh
+
+    def test_recent_idle_not_evicted_before_timeout(self) -> None:
+        registry = SessionRegistry(
+            policy=EvictionPolicy(max_resident=100, idle_timeout_s=60)
+        )
+        session = _session("recent")
+        session.last_activity = 1000.0
+        registry.add(session)
+
+        assert registry.sweep(now=1030.0) == []
+        assert registry.get("recent") is session
+
+    def test_active_session_never_evicted_by_timeout(self) -> None:
+        registry = SessionRegistry(
+            policy=EvictionPolicy(max_resident=100, idle_timeout_s=10)
+        )
+        busy = _session("busy", status="active")
+        busy.last_activity = 0.0
+        registry.add(busy)
+
+        assert registry.sweep(now=99999.0) == []
+        assert registry.get("busy") is busy
+
+    def test_idle_with_inbox_not_evicted_by_timeout(self) -> None:
+        registry = SessionRegistry(
+            policy=EvictionPolicy(max_resident=100, idle_timeout_s=10)
+        )
+        pending = _session("pending")
+        pending.last_activity = 0.0
+        pending.inbox.put_control(InterruptRequest(reason="timeout"))
+        registry.add(pending)
+
+        assert registry.sweep(now=99999.0) == []
+        assert registry.get("pending") is pending
+
+
+class TestBusyRelease:
+    """S3：``active`` 状态必须能被真实设置，否则保护形同虚设。"""
+
+    def test_busy_sets_active_and_release_restores_idle(self) -> None:
+        session = _session("s")
+        assert session.status == "idle"
+
+        session.busy()
+        assert session.status == "active"
+
+        session.release()
+        assert session.status == "idle"
+
+    def test_release_keeps_ended_status(self) -> None:
+        session = _session("s")
+        session.status = "ended"
+        session.release()
+        assert session.status == "ended"
+
+    def test_busy_session_protected_then_evictable_after_release(self) -> None:
+        registry = SessionRegistry(
+            policy=EvictionPolicy(max_resident=1, idle_timeout_s=10)
+        )
+        worker = _session("worker")
+        worker.busy()
+        registry.add(worker)
+
+        # active 期间即使严重超时也不卸载
+        assert registry.sweep(now=worker.last_activity + 99999.0) == []
+        assert registry.get("worker") is worker
+
+        # 推理结束后恢复可驱逐
+        worker.release()
+        assert registry.sweep(now=worker.last_activity + 99999.0) == ["worker"]
+
+
+class TestPeriodicSweeper:
+    """S2：后台线程须按 ``sweep_interval_s`` 周期清扫。"""
+
+    def test_sweeper_evicts_stale_session_without_manual_call(self) -> None:
+        registry = SessionRegistry(
+            policy=EvictionPolicy(max_resident=100, idle_timeout_s=0, sweep_interval_s=1)
+        )
+        stale = _session("stale")
+        stale.last_activity = 0.0
+        registry.add(stale)
+
+        registry.start_sweeper()
+        try:
+            deadline = time.time() + 5.0
+            while time.time() < deadline and registry.get("stale") is not None:
+                time.sleep(0.05)
+            assert registry.get("stale") is None
+        finally:
+            registry.stop_sweeper()
+
+    def test_sweeper_start_is_idempotent_and_stoppable(self) -> None:
+        registry = SessionRegistry(policy=EvictionPolicy(sweep_interval_s=1))
+        assert registry.sweeping is False
+
+        registry.start_sweeper()
+        registry.start_sweeper()  # 幂等
+        assert registry.sweeping is True
+
+        registry.stop_sweeper()
+        assert registry.sweeping is False
+
+    def test_stop_sweeper_is_idempotent(self) -> None:
+        registry = SessionRegistry()
+        registry.stop_sweeper()  # 从未启动也不报错
+        registry.stop_sweeper()
+        assert registry.sweeping is False

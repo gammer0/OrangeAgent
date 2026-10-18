@@ -28,6 +28,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import threading
 import time
 import uuid
@@ -181,6 +182,17 @@ class Session:
         """刷新 ``last_activity``，用于驱逐排序。"""
         self.last_activity = time.time()
 
+    def busy(self) -> None:
+        """标记会话正在推理：``active`` 会话不会被 ``sweep`` 卸载（H10）。"""
+        self.status = "active"
+        self.touch()
+
+    def release(self) -> None:
+        """推理结束，会话回到 ``idle``，重新可被驱逐。"""
+        if self.status != "ended":
+            self.status = "idle"
+        self.touch()
+
 
 def _default_tree_query() -> TreeQueryStateProtocol:
     """构造默认的空 ``TreeQueryState`` 占位对象（避免导入 B 组实现）。"""
@@ -229,6 +241,10 @@ class SessionRegistry:
         self.sessions: dict[str, Session] = {}
         self.lock = threading.Lock()
         self.policy = policy or EvictionPolicy()
+        # 后台清扫线程（S2）：懒启动，默认不运行
+        self._sweeper: threading.Thread | None = None
+        self._sweeper_stop = threading.Event()
+        self._sweeper_lock = threading.Lock()
 
     # ------------------------------------------------------------------
     # 基本读写
@@ -278,19 +294,32 @@ class SessionRegistry:
     # 驱逐
     # ------------------------------------------------------------------
 
-    def sweep(self) -> list[str]:
+    def _evictable(self, session: Session, now: float) -> bool:
+        """会话是否可被卸载：不活跃（``idle``）且无待处理消息（H10）。"""
+        return session.status == "idle" and session.inbox.is_empty()
+
+    def sweep(self, now: float | None = None) -> list[str]:
         """执行一次驱逐扫描（文档 §2.4）。
 
-        1. 持锁移除全部 ``ended`` 会话（H12）；
-        2. 若驻留数超过 ``max_resident``，按 ``last_activity`` 升序卸载
-           ``idle`` 且两通道均为空的会话，直到满足上限或无可卸载对象
-           （H10 / H11）。
+        三段规则，均在**同一把锁**内完成（H11“卸载须持锁”）：
 
-        整个过程在**同一把锁**内完成，满足 H11 的“卸载须持锁”要求。
+        1. 持锁移除全部 ``ended`` 会话（H12）；
+        2. **空闲超时**：``now - last_activity > idle_timeout_s`` 且可卸载者，
+           一律卸载。这是唯一不依赖会话数量的回收路径；
+        3. **容量溢出**：若驻留数仍超过 ``max_resident``，按 ``last_activity``
+           升序继续卸载可卸载会话，直到满足上限或无可卸载对象。
+
+        可卸载（H10）= ``status == "idle"`` 且 ``inbox`` 为空。
+        ``active`` 会话（正在推理）永不卸载，因此驻留数可能短暂超过
+        ``max_resident`` —— 上限是目标而非硬约束。
+
+        Args:
+            now: 逻辑当前时间（秒）。默认取 ``time.time()``；测试可注入。
 
         Returns:
             被卸载（含 ``ended`` 移除）的 ``session_id`` 列表。
         """
+        current = time.time() if now is None else now
         evicted: list[str] = []
 
         with self.lock:
@@ -298,14 +327,22 @@ class SessionRegistry:
                 self.sessions.pop(session_id, None)
                 evicted.append(session_id)
 
+            # ① 空闲超时淘汰（与容量无关）
+            timed_out = [
+                s
+                for s in self.sessions.values()
+                if self._evictable(s, current)
+                and current - s.last_activity > self.policy.idle_timeout_s
+            ]
+            for session in timed_out:
+                self.sessions.pop(session.session_id, None)
+                evicted.append(session.session_id)
+
+            # ② 容量溢出淘汰（LRU）
             overflow = len(self.sessions) - self.policy.max_resident
             if overflow > 0:
                 candidates = sorted(
-                    (
-                        s
-                        for s in self.sessions.values()
-                        if s.status == "idle" and s.inbox.is_empty()
-                    ),
+                    (s for s in self.sessions.values() if self._evictable(s, current)),
                     key=lambda s: s.last_activity,
                 )
                 for session in candidates[:overflow]:
@@ -318,3 +355,52 @@ class SessionRegistry:
         """当前内存驻留的全部会话 id（快照，持锁）。"""
         with self.lock:
             return list(self.sessions.keys())
+
+    # ------------------------------------------------------------------
+    # 周期清扫（S2）
+    # ------------------------------------------------------------------
+
+    def start_sweeper(self) -> None:
+        """启动后台清扫线程，按 ``policy.sweep_interval_s`` 周期调用 ``sweep()``。
+
+        幂等：已在运行时直接返回。线程为守护线程，不阻止进程退出；
+        ``stop_sweeper()`` 会尽快唤醒并结束它（``Event.wait`` 可被立即打断，
+        因此不会为等待一个完整周期而阻塞关闭）。
+        """
+        with self._sweeper_lock:
+            if self._sweeper is not None and self._sweeper.is_alive():
+                return
+
+            self._sweeper_stop.clear()
+            thread = threading.Thread(
+                target=self._sweeper_loop,
+                name="harness-session-sweeper",
+                daemon=True,
+            )
+            self._sweeper = thread
+            thread.start()
+
+    def stop_sweeper(self, timeout: float = 2.0) -> None:
+        """通知后台清扫线程退出并等待其结束（幂等）。"""
+        with self._sweeper_lock:
+            thread = self._sweeper
+            self._sweeper = None
+            self._sweeper_stop.set()
+
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=timeout)
+
+    @property
+    def sweeping(self) -> bool:
+        """后台清扫线程是否正在运行。"""
+        with self._sweeper_lock:
+            return self._sweeper is not None and self._sweeper.is_alive()
+
+    def _sweeper_loop(self) -> None:
+        """清扫线程主体：等待间隔 → 扫描，直到被要求停止。"""
+        interval = max(1, int(self.policy.sweep_interval_s))
+        # 首轮延后一个完整周期，避免服务刚启动就因空表扫描产生噪音
+        while not self._sweeper_stop.wait(interval):
+            # 清扫是尽力而为，任何异常都不应拖垮服务或结束线程
+            with contextlib.suppress(Exception):
+                self.sweep()

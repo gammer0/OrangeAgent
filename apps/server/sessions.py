@@ -45,6 +45,7 @@ from harness.message import AssistantMsg, Message, SystemMsg, ToolCall, ToolMsg,
 from harness.model import ReverseProxy
 from harness.permission import AgentPermissions
 from harness.permission_store import WEB_AGENT, load_permissions
+from harness.session import Session
 from harness.tool_tree import EMPTY_SCHEMA, FlatStore, ToolDef, build_tree
 
 __all__ = [
@@ -241,6 +242,8 @@ class SessionRunner:
     state: str = "idle"
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
+    #: 核心层会话对象（S4）：让 registry 的驱逐策略看到真实忙闲状态。
+    core_session: Any = None
 
     _seq: int = 0
     _lock: threading.Lock = field(default_factory=threading.Lock)
@@ -402,6 +405,13 @@ class SessionRunner:
 
     def _set_state(self, state: str, detail: str = "") -> None:
         self.state = state
+        # S4：把 Web 状态同步到核心 Session，让驱逐策略感知忙闲。
+        core = self.core_session
+        if core is not None:
+            if state == "running":
+                core.busy()
+            elif state in {"done", "aborted", "error", "idle"}:
+                core.release()
         self.emit("state", {"state": state, "detail": detail})
 
     # ------------------------------------------------------------ 运行
@@ -671,6 +681,15 @@ class SessionManager:
         self.load_capabilities(workdir)
         self._sessions: dict[str, SessionRunner] = {}
         self._lock = threading.Lock()
+        # 核心会话注册表（S4）：Web 会话也纳入空闲超时与容量驱逐。
+        # 构造失败不应阻止服务启动，退化为仅靠 max_sessions 保护。
+        try:
+            from harness.session import EvictionPolicy, SessionRegistry
+
+            self.registry: Any = SessionRegistry(EvictionPolicy())
+            self.registry.start_sweeper()
+        except Exception:  # noqa: BLE001
+            self.registry = None
 
     @property
     def compress_available(self) -> bool:
@@ -746,6 +765,11 @@ class SessionManager:
                 model=model or self.default_model,
                 capacity=capacity or self.capacity,
             )
+            # S4：登记到核心注册表，让空闲超时/容量驱逐真正覆盖 Web 会话。
+            if self.registry is not None:
+                core = Session(session_id=session_id, working_dir=self.workdir)
+                runner.core_session = core
+                self.registry.add(core)
             self._sessions[session_id] = runner
             return runner
 
@@ -765,6 +789,9 @@ class SessionManager:
             return False
         if runner.running:
             runner.cancel()
+        # S4：同步摘除核心会话，避免 registry 里留下幽灵条目
+        if self.registry is not None:
+            self.registry.end(session_id)
         return True
 
     def models(self) -> list[str]:
