@@ -38,6 +38,7 @@ from harness.defaults import (
 from harness.discovery import DiscoveredTools, TreeQueryState, TreeSessionState
 from harness.model import ReverseProxy
 from harness.permission import AgentPermissions
+from harness.permission_store import LOCAL_AGENT, load_permissions
 from harness.session import EvictionPolicy, SessionRegistry
 from harness.session_store import SessionStore
 from harness.tool_tree import FlatStore, ToolTree, build_tree
@@ -164,6 +165,7 @@ class HarnessService:
         self.tree: ToolTree | None = None
         #: 按 ``.agent/capabilities.json`` 装载的能力清单；未装载时为 None。
         self.capabilities: CapabilityManifest | None = None
+        self.permissions: AgentPermissions = AgentPermissions(agent_id=LOCAL_AGENT)
         self.registry: SessionRegistry | None = None
         self.store: SessionStore | None = None
         self.proxy: ReverseProxy | None = None
@@ -186,19 +188,36 @@ class HarnessService:
         ponytail: 必须读 ``.agent/capabilities.json``，否则 CLI 看到的是一棵空树，
         而 Web 服务按清单装载了实际工具——两边观测到的能力面不一致。
         清单不存在或非法时退回空树（保守降级，与 I4 一致）。
+
+        权限从 ``.agent/permissions.json`` 读取（agent_id=``local``），
+        使 CLI 与运行时看到同一套屏蔽结果；文件缺失时为空表（全部允许）。
         """
         try:
             self.flat_store = FlatStore()
+            manifest_problems: list[str] = []
             try:
-                manifest = load_manifest(self.workdir)
+                manifest = load_manifest(self.workdir, problems=manifest_problems)
             except CapabilityError as exc:
                 self.problems.append(f"capability: {exc}")
                 manifest = None
+            self.problems.extend(manifest_problems)
             if manifest is not None:
                 for entry in manifest.to_tooldefs(str(self.workdir)):
                     self.flat_store.put(entry)
                 self.capabilities = manifest
-            self.tree = build_tree(self.flat_store, AgentPermissions(agent_id="local"))
+            self.permissions = load_permissions(
+                self.workdir, LOCAL_AGENT, problems=self.problems
+            )
+            group_descriptions = (
+                {g.group_id: g.description for g in self.capabilities.groups}
+                if self.capabilities is not None
+                else {}
+            )
+            self.tree = build_tree(
+                self.flat_store,
+                self.permissions,
+                group_descriptions=group_descriptions,
+            )
         except Exception as exc:  # noqa: BLE001 - 组合根必须降级而非崩溃
             self.problems.append(f"capability: {exc}")
             self.flat_store = None

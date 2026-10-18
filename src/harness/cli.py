@@ -28,8 +28,12 @@ from harness.capabilities import (
     BUILTIN_TOOL_PATHS,
     CapabilityError,
     CapabilityManifest,
+    GroupDef,
     SkillDef,
+    SourceSpec,
+    _build_external_tool,
     build_builtin_tool,
+    group_of,
     load_manifest,
     save_manifest,
     write_skill_files,
@@ -478,24 +482,393 @@ def _save_and_report(manifest: CapabilityManifest, workdir: str, *, as_json: boo
 
 
 def _print_capabilities(manifest: CapabilityManifest, *, as_json: bool) -> None:
-    """打印当前清单。"""
+    """打印当前清单（按分组聚合）。"""
     if as_json:
         _print_json(manifest.to_dict())
         return
     if not manifest.tools and not manifest.skills:
         print("（空清单）使用 `harness tools add --preset all` 装载工具")
         return
-    if manifest.tools:
-        print(f"[工具] {len(manifest.tools)} 个")
-        for tool in sorted(manifest.tools, key=lambda t: t.path):
-            marks = f"caps={','.join(tool.caps) or '-'} {tool.concurrency}"
-            if tool.idempotent:
-                marks += " idem"
-            print(f"  {tool.path:<28} {marks:<28} {tool.description}")
-    if manifest.skills:
-        print(f"[skill] {len(manifest.skills)} 个")
-        for skill in sorted(manifest.skills, key=lambda s: s.name):
-            print(f"  {skill.path:<28} source={skill.source:<24} {skill.description}")
+
+    buckets: dict[str, list[str]] = {}
+    for tool in sorted(manifest.tools, key=lambda t: t.path):
+        marks = f"caps={','.join(tool.caps) or '-'} {tool.concurrency}"
+        if tool.idempotent:
+            marks += " idem"
+        if tool.path in manifest.sources:
+            marks += " [ext]"
+        buckets.setdefault(group_of(tool.path) or "(root)", []).append(
+            f"  {tool.path:<30} {marks:<28} {tool.description}"
+        )
+    for skill in sorted(manifest.skills, key=lambda s: s.path):
+        buckets.setdefault(group_of(skill.path) or "(root)", []).append(
+            f"  {skill.path:<30} source={skill.source:<20} {skill.description}"
+        )
+
+    for group_id in sorted(buckets):
+        meta = manifest.get_group(group_id)
+        label = f" — {meta.description}" if meta and meta.description else ""
+        print(f"[{group_id}]{label}")
+        for line in buckets[group_id]:
+            print(line)
+
+
+# ---------------------------------------------------------------------------
+# 分组命令
+# ---------------------------------------------------------------------------
+
+
+def _cmd_groups_list(args: argparse.Namespace) -> int:
+    """``harness groups list``：列出分组及其成员数。"""
+    manifest = _load_or_empty(args.workdir)
+    rows = []
+    for group_id in manifest.group_ids():
+        prefix = f"/{group_id}/"
+        members = [t.path for t in manifest.tools if t.path.startswith(prefix)]
+        members += [s.path for s in manifest.skills if s.path.startswith(prefix)]
+        meta = manifest.get_group(group_id)
+        rows.append(
+            {
+                "group_id": group_id,
+                "path": f"/{group_id}",
+                "members": len(members),
+                "description": meta.description if meta else "",
+                "declared": meta is not None,
+            }
+        )
+    if args.json:
+        _print_json({"groups": rows})
+        return 0
+    if not rows:
+        print("（无分组）使用 `harness groups create tool/<名> --description ...` 新建")
+        return 0
+    for row in rows:
+        flag = "" if row["declared"] else " (派生)"
+        print(
+            f"{row['path']:<28} 成员 {row['members']:>2} 个{flag:<8} {row['description']}"
+        )
+    return 0
+
+
+def _cmd_groups_create(args: argparse.Namespace) -> int:
+    """``harness groups create``：声明一个分组（工具树上作为中间节点出现）。"""
+    manifest = _load_or_empty(args.workdir)
+    try:
+        group = GroupDef(group_id=args.group_id, description=args.description or "")
+        manifest.add_group(group)
+    except CapabilityError as exc:
+        print(f"无法创建分组: {exc}", file=sys.stderr)
+        return 2
+    target = save_manifest(manifest, args.workdir)
+    if args.json:
+        _print_json({"created": group.group_id, "path": group.path, "file": str(target)})
+        return 0
+    print(f"已创建分组: {group.path}")
+    print(f"已写入: {target}")
+    return 0
+
+
+def _cmd_groups_remove(args: argparse.Namespace) -> int:
+    """``harness groups remove``：删除分组声明（不影响成员，除非先移除）。"""
+    manifest = _load_or_empty(args.workdir)
+    try:
+        removed = manifest.remove_group(args.group_id, force=args.force)
+    except CapabilityError as exc:
+        print(f"无法删除分组: {exc}（加 --force 可逆）", file=sys.stderr)
+        return 2
+    if not removed:
+        print(f"没有该分组: {args.group_id}", file=sys.stderr)
+        return 1
+    target = save_manifest(manifest, args.workdir)
+    if args.json:
+        _print_json({"removed": args.group_id, "file": str(target)})
+        return 0
+    print(f"已删除分组声明: {args.group_id}")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# 外来工具命令
+# ---------------------------------------------------------------------------
+
+
+def _cmd_tools_add_ext(args: argparse.Namespace) -> int:
+    """``harness tools add-ext``：装载外来工具（执行本体代码，供应链负责）。"""
+    path = args.path
+    if not path.startswith("/"):
+        head = args.group.replace("/", "") or "tool"
+        path = f"/{head}/{path.lstrip('/')}"
+    try:
+        source = SourceSpec(
+            kind=args.kind, target=args.target, callable=args.callable
+        )
+    except CapabilityError as exc:
+        print(f"来源声明非法: {exc}", file=sys.stderr)
+        return 2
+
+    manifest = _load_or_empty(args.workdir)
+    schema: dict = {"type": "object", "properties": {}, "required": []}
+    if args.schema:
+        try:
+            schema = json.loads(Path(args.schema).read_text(encoding="utf-8"))
+        except Exception as exc:  # noqa: BLE001
+            print(f"无法读取 schema 文件: {exc}", file=sys.stderr)
+            return 2
+
+    entry = {
+        "path": path,
+        "description": args.description or f"外来工具 {path}",
+        "caps": args.caps or ["exec"],
+        "idempotent": bool(args.idempotent),
+        "schema": schema,
+        "source": source.to_dict(),
+    }
+    try:
+        tool = _build_external_tool(path, entry, source, args.workdir)
+        if manifest.has_path(path):
+            manifest.remove(path)
+        manifest.add_tool(tool)
+        manifest.sources[path] = source
+    except CapabilityError as exc:
+        print(f"无法装载外来工具: {exc}", file=sys.stderr)
+        return 2
+
+    target = save_manifest(manifest, args.workdir)
+    if args.json:
+        _print_json({"added": path, "source": source.to_dict(), "file": str(target)})
+        return 0
+    print(f"已装载外来工具: {path}")
+    print(f"  来源: {source.kind}:{source.target}:{source.callable}")
+    print(f"  分组: /{group_of(path)}")
+    print(f"已写入: {target}")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# MCP 命令
+# ---------------------------------------------------------------------------
+
+
+def _cmd_mcp_add(args: argparse.Namespace) -> int:
+    """``harness mcp add``：声明 MCP 服务器并拉取工具清单。"""
+    from harness.mcp_client import McpError, McpServerConfig, list_tools
+
+    workdir = args.workdir
+    config = McpServerConfig(
+        name=args.name,
+        command=args.command,
+        args=tuple(args.arg or ()),
+        env=tuple(
+            tuple(item.split("=", 1)) for item in (args.env or []) if "=" in item
+        ),
+    )
+
+    try:
+        discovered = list_tools(config, workdir)
+    except McpError as exc:
+        print(f"无法连接 MCP 服务器: {exc}", file=sys.stderr)
+        return 2
+
+    manifest = _load_or_empty(workdir)
+    manifest.mcp_servers = [
+        s for s in manifest.mcp_servers if s.get("name") != config.name
+    ]
+    manifest.mcp_servers.append(config.to_dict())
+
+    added = 0
+    for remote in discovered:
+        tool_name = remote.get("name", "")
+        if not tool_name:
+            continue
+        path = f"/mcp/{config.name}/{tool_name}"
+        entry = {
+            "path": path,
+            "description": (remote.get("description") or f"MCP {config.name}/{tool_name}")
+            .split("\n")[0],
+            "caps": ["exec"],
+            "idempotent": False,
+            "schema": remote.get("inputSchema") or {"type": "object", "properties": {}},
+            "source": {"kind": "mcp", "target": config.name, "callable": tool_name},
+            "remote_name": tool_name,
+        }
+        try:
+            tool = _build_external_tool(
+                path, entry, SourceSpec(kind="mcp", target=config.name, callable=tool_name), workdir
+            )
+            if manifest.has_path(path):
+                manifest.remove(path)
+            manifest.add_tool(tool)
+            manifest.sources[path] = SourceSpec(
+                kind="mcp", target=config.name, callable=tool_name
+            )
+            added += 1
+        except CapabilityError as exc:
+            print(f"跳过 {path}: {exc}", file=sys.stderr)
+
+    target = save_manifest(manifest, workdir)
+    if args.json:
+        _print_json(
+            {
+                "server": config.name,
+                "tools": [t.get("name") for t in discovered],
+                "added": added,
+                "file": str(target),
+            }
+        )
+        return 0
+    print(f"已添加 MCP 服务器: {config.name}")
+    print(f"  发现 {len(discovered)} 个工具，已装载 {added} 个到 /mcp/{config.name}/")
+    return 0
+
+
+def _cmd_mcp_list(args: argparse.Namespace) -> int:
+    """``harness mcp list``：列出 MCP 服务器及其工具数。"""
+    manifest = _load_or_empty(args.workdir)
+    rows = []
+    for server in manifest.mcp_servers:
+        name = server.get("name", "")
+        prefix = f"/mcp/{name}/"
+        tools = [t.path for t in manifest.tools if t.path.startswith(prefix)]
+        rows.append(
+            {
+                "name": name,
+                "command": server.get("command", ""),
+                "args": server.get("args") or [],
+                "tools": len(tools),
+            }
+        )
+    if args.json:
+        _print_json({"servers": rows})
+        return 0
+    if not rows:
+        print("（无 MCP 服务器）使用 `harness mcp add <名> --command <cmd>` 添加")
+        return 0
+    for row in rows:
+        cmd = " ".join([row["command"], *row["args"]])
+        print(f"/mcp/{row['name']:<22} 工具 {row['tools']:>2} 个  {cmd}")
+    return 0
+
+
+def _cmd_mcp_remove(args: argparse.Namespace) -> int:
+    """``harness mcp remove``：删除服务器声明及其工具。"""
+    manifest = _load_or_empty(args.workdir)
+    prefix = f"/mcp/{args.name}/"
+    before = len(manifest.tools)
+    manifest.tools = [t for t in manifest.tools if not t.path.startswith(prefix)]
+    removed_tools = before - len(manifest.tools)
+    before_servers = len(manifest.mcp_servers)
+    manifest.mcp_servers = [
+        s for s in manifest.mcp_servers if s.get("name") != args.name
+    ]
+    if len(manifest.mcp_servers) == before_servers:
+        print(f"没有该 MCP 服务器: {args.name}", file=sys.stderr)
+        return 1
+    target = save_manifest(manifest, args.workdir)
+    if args.json:
+        _print_json({"removed": args.name, "tools": removed_tools, "file": str(target)})
+        return 0
+    print(f"已删除 MCP 服务器 {args.name}（连带 {removed_tools} 个工具）")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# 权限命令
+# ---------------------------------------------------------------------------
+
+
+def _cmd_perms_list(args: argparse.Namespace) -> int:
+    """``harness perms list``：列出拒绝记录。"""
+    from harness.permission_store import list_grants
+
+    data = list_grants(args.workdir)
+    if args.agent:
+        data = {k: v for k, v in data.items() if k == args.agent}
+    if args.json:
+        _print_json({"agents": data})
+        return 0
+    if not data:
+        print("（无拒绝记录）所有路径默认允许（B15）")
+        return 0
+    for agent_id, grants in sorted(data.items()):
+        denied = [p for p, allowed in grants.items() if not allowed]
+        print(f"[{agent_id}] 拒绝 {len(denied)} 条")
+        for path in sorted(denied):
+            print(f"  {path}")
+    return 0
+
+
+def _cmd_perms_deny(args: argparse.Namespace) -> int:
+    """``harness perms deny``：拒绝某路径（含其子树）的查询与调用。"""
+    from harness.permission_store import set_grant
+
+    workdir = args.workdir
+    agents = args.agent or ["local", "web"]
+    done = []
+    for agent_id in agents:
+        try:
+            set_grant(workdir, args.path, allowed=False, agent_id=agent_id)
+            done.append(agent_id)
+        except ValueError as exc:
+            print(f"{agent_id}: {exc}", file=sys.stderr)
+            return 2
+    if args.json:
+        _print_json({"denied": args.path, "agents": done})
+        return 0
+    print(f"已拒绝: {args.path}（agent: {', '.join(done)}）")
+    print("该路径及其子树将不再出现在工具树索引中，调用返回 3a PermissionDenied")
+    return 0
+
+
+def _cmd_perms_grant(args: argparse.Namespace) -> int:
+    """``harness perms grant``：恢复允许（删除例外）。"""
+    from harness.permission_store import set_grant
+
+    workdir = args.workdir
+    agents = args.agent or ["local", "web"]
+    done = []
+    for agent_id in agents:
+        try:
+            set_grant(workdir, args.path, allowed=True, agent_id=agent_id)
+            done.append(agent_id)
+        except ValueError as exc:
+            print(f"{agent_id}: {exc}", file=sys.stderr)
+            return 2
+    if args.json:
+        _print_json({"granted": args.path, "agents": done})
+        return 0
+    print(f"已恢复允许: {args.path}（agent: {', '.join(done)}）")
+    return 0
+
+
+def _cmd_perms_show(args: argparse.Namespace) -> int:
+    """``harness perms show``：查某路径的实际判定结果。"""
+    from harness.permission import AgentPermissions, visible
+    from harness.permission_store import load_permissions
+
+    workdir = args.workdir
+    agents = args.agent or ["local", "web"]
+    rows = []
+    for agent_id in agents:
+        perms = load_permissions(workdir, agent_id)
+        rows.append(
+            {
+                "agent": agent_id,
+                "allowed": visible(args.path, perms),
+                "explicit": perms.grants.get(args.path),
+            }
+        )
+    if args.json:
+        _print_json({"path": args.path, "results": rows})
+        return 0
+    print(f"路径: {args.path}")
+    for row in rows:
+        state = "允许" if row["allowed"] else "拒绝"
+        explicit = row["explicit"]
+        reason = "显式拒绝" if explicit is False else "默认允许（B15）"
+        if explicit is None and not row["allowed"]:
+            reason = "祖先被拒，整棵子树隐藏（B5）"
+        print(f"  [{row['agent']}] {state} — {reason}")
+    return 0
 
 
 def _cmd_tools_list(args: argparse.Namespace) -> int:
@@ -793,7 +1166,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     tree = service_sub.add_parser("tree", help="打印工具树索引")
     _add_common_options(tree)
-    tree.add_argument("--depth", type=int, default=2, help="索引深度，默认 2")
+    tree.add_argument(
+        "--depth",
+        type=int,
+        default=0,
+        help="索引深度；0 表示全展开（默认），1 只列 L1",
+    )
     tree.set_defaults(func=_cmd_service_tree)
 
     # ---- config ----
@@ -880,6 +1258,93 @@ def build_parser() -> argparse.ArgumentParser:
     skills_show.add_argument("name", help="skill 名")
     skills_show.add_argument("--file", default="SKILL.md", help="相对文件名")
     skills_show.set_defaults(func=_cmd_skills_show)
+
+    # ---- groups ----
+    groups = sub.add_parser("groups", help="工具树分组管理")
+    _add_common_options(groups)
+    groups_sub = groups.add_subparsers(dest="action", required=True)
+
+    groups_list = groups_sub.add_parser("list", help="列出分组及成员数")
+    _add_common_options(groups_list)
+    groups_list.set_defaults(func=_cmd_groups_list)
+
+    groups_create = groups_sub.add_parser("create", help="创建分组（工具树中间节点）")
+    _add_common_options(groups_create)
+    groups_create.add_argument("group_id", help="如 tool/mytools 或 mcp/filesystem")
+    groups_create.add_argument("--description", default="", help="单行描述")
+    groups_create.set_defaults(func=_cmd_groups_create)
+
+    groups_remove = groups_sub.add_parser("remove", help="删除分组声明")
+    _add_common_options(groups_remove)
+    groups_remove.add_argument("group_id", help="分组标识")
+    groups_remove.add_argument("--force", action="store_true", help="成员非空也删描述")
+    groups_remove.set_defaults(func=_cmd_groups_remove)
+
+    # ---- tools add-ext ----
+    tools_add_ext = tools_sub.add_parser(
+        "add-ext", help="装载外来工具（允许执行本体代码）"
+    )
+    _add_common_options(tools_add_ext)
+    tools_add_ext.add_argument("path", help="工具路径，如 /tool/mytools/hello")
+    tools_add_ext.add_argument("--target", required=True, help="./ext/hello.py 或 模块名")
+    tools_add_ext.add_argument("--callable", default="run", help="目标函数名，默认 run")
+    tools_add_ext.add_argument("--kind", default="python", choices=["python"], help="来源类型")
+    tools_add_ext.add_argument("--description", default="", help="单行描述")
+    tools_add_ext.add_argument("--caps", action="append", default=None, help="能力位，可重复")
+    tools_add_ext.add_argument("--idempotent", action="store_true", help="标记为幂等")
+    tools_add_ext.add_argument("--schema", default=None, help="参数 schema 的 JSON 文件")
+    tools_add_ext.add_argument("--group", default="", help="省略时从 path 推导")
+    tools_add_ext.set_defaults(func=_cmd_tools_add_ext)
+
+    # ---- mcp ----
+    mcp = sub.add_parser("mcp", help="MCP 服务器管理（JSON-RPC over stdio）")
+    _add_common_options(mcp)
+    mcp_sub = mcp.add_subparsers(dest="action", required=True)
+
+    mcp_add = mcp_sub.add_parser("add", help="声明服务器并拉取工具清单")
+    _add_common_options(mcp_add)
+    mcp_add.add_argument("name", help="服务器名（同时作为 /mcp/<名> 分组）")
+    mcp_add.add_argument("--command", required=True, help="可执行文件，如 npx")
+    mcp_add.add_argument("--arg", action="append", default=None, help="命令参数，可重复")
+    mcp_add.add_argument("--env", action="append", default=None, help="K=V，可重复")
+    mcp_add.set_defaults(func=_cmd_mcp_add)
+
+    mcp_list = mcp_sub.add_parser("list", help="列出 MCP 服务器")
+    _add_common_options(mcp_list)
+    mcp_list.set_defaults(func=_cmd_mcp_list)
+
+    mcp_remove = mcp_sub.add_parser("remove", help="删除服务器及其工具")
+    _add_common_options(mcp_remove)
+    mcp_remove.add_argument("name", help="服务器名")
+    mcp_remove.set_defaults(func=_cmd_mcp_remove)
+
+    # ---- perms ----
+    perms = sub.add_parser("perms", help="工具权限管理（真实屏蔽查询与调用）")
+    _add_common_options(perms)
+    perms_sub = perms.add_subparsers(dest="action", required=True)
+
+    perms_list = perms_sub.add_parser("list", help="列出拒绝记录")
+    _add_common_options(perms_list)
+    perms_list.add_argument("--agent", action="append", default=None, help="限定 agent，可重复")
+    perms_list.set_defaults(func=_cmd_perms_list)
+
+    perms_deny = perms_sub.add_parser("deny", help="拒绝某路径（含子树）")
+    _add_common_options(perms_deny)
+    perms_deny.add_argument("path", help="绝对路径，如 /tool/os/shell/run")
+    perms_deny.add_argument("--agent", action="append", default=None, help="默认 local+web")
+    perms_deny.set_defaults(func=_cmd_perms_deny)
+
+    perms_grant = perms_sub.add_parser("grant", help="恢复允许（删除例外）")
+    _add_common_options(perms_grant)
+    perms_grant.add_argument("path", help="绝对路径")
+    perms_grant.add_argument("--agent", action="append", default=None, help="默认 local+web")
+    perms_grant.set_defaults(func=_cmd_perms_grant)
+
+    perms_show = perms_sub.add_parser("show", help="查某路径的实际判定")
+    _add_common_options(perms_show)
+    perms_show.add_argument("path", help="绝对路径")
+    perms_show.add_argument("--agent", action="append", default=None, help="默认 local+web")
+    perms_show.set_defaults(func=_cmd_perms_show)
 
     return parser
 

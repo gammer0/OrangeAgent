@@ -42,6 +42,7 @@ from harness.loop import AgentLoop, LoopHooks, StepController
 from harness.message import AssistantMsg, Message, SystemMsg, ToolCall, ToolMsg, UserMsg
 from harness.model import ReverseProxy
 from harness.permission import AgentPermissions
+from harness.permission_store import WEB_AGENT, load_permissions
 from harness.tool_tree import EMPTY_SCHEMA, FlatStore, ToolDef, build_tree
 
 __all__ = [
@@ -92,7 +93,8 @@ class DemoToolRegistry:
         self.store = FlatStore()
         for entry in self._definitions():
             self.store.put(entry)
-        self.tree = build_tree(self.store, AgentPermissions(agent_id="web"))
+        self.permissions = AgentPermissions(agent_id="web")
+        self.tree = build_tree(self.store, self.permissions)
 
     def _definitions(self) -> list[ToolDef]:
         return [
@@ -252,7 +254,7 @@ class SessionRunner:
         )
         self.system = self.assembler.build_system(
             SystemPromptParts(
-                tool_index=self.tools.tree.tree_index(depth=2),
+                tool_index=self.tools.tree.tree_index(depth=0),
                 working_dir=self.workdir,
                 goal=None,
             )
@@ -692,7 +694,14 @@ class SessionManager:
             store.put(entry)
         self.tools = DemoToolRegistry(workdir)
         self.tools.store = store
-        self.tools.tree = build_tree(store, AgentPermissions(agent_id="web"))
+        self.permissions = load_permissions(workdir, WEB_AGENT)
+        self.tools.tree = build_tree(
+            store,
+            self.permissions,
+            group_descriptions={
+                g.group_id: g.description for g in manifest.groups
+            },
+        )
         self.capabilities = manifest
         self.capability_error = None
 

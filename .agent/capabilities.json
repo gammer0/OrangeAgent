@@ -1,6 +1,7 @@
 {
-  "version": 1,
+  "version": 2,
   "notes": [],
+  "groups": [],
   "tools": [
     {
       "path": "/mcp/fs/list",
@@ -8,7 +9,18 @@
       "caps": [
         "read"
       ],
-      "idempotent": true
+      "idempotent": true,
+      "builtin": "fs/list",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "default": "."
+          }
+        },
+        "required": []
+      }
     },
     {
       "path": "/mcp/fs/read",
@@ -16,7 +28,19 @@
       "caps": [
         "read"
       ],
-      "idempotent": true
+      "idempotent": true,
+      "builtin": "fs/read",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ]
+      }
     },
     {
       "path": "/mcp/fs/write",
@@ -24,7 +48,23 @@
       "caps": [
         "write"
       ],
-      "idempotent": false
+      "idempotent": false,
+      "builtin": "fs/write",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "content": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "content"
+        ]
+      }
     },
     {
       "path": "/tool/code/py/check",
@@ -32,7 +72,19 @@
       "caps": [
         "read"
       ],
-      "idempotent": true
+      "idempotent": true,
+      "builtin": "code/py/check",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ]
+      }
     },
     {
       "path": "/tool/code/py/run_brief",
@@ -40,7 +92,23 @@
       "caps": [
         "exec"
       ],
-      "idempotent": false
+      "idempotent": false,
+      "builtin": "code/py/run_brief",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "timeout": {
+            "type": "integer",
+            "default": 20
+          }
+        },
+        "required": [
+          "path"
+        ]
+      }
     },
     {
       "path": "/tool/fluid/check",
@@ -48,7 +116,18 @@
       "caps": [
         "read"
       ],
-      "idempotent": true
+      "idempotent": true,
+      "builtin": "fluid/check",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "default": "fluid"
+          }
+        },
+        "required": []
+      }
     },
     {
       "path": "/tool/fluid/probe",
@@ -56,7 +135,22 @@
       "caps": [
         "exec"
       ],
-      "idempotent": false
+      "idempotent": false,
+      "builtin": "fluid/probe",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "default": "fluid"
+          },
+          "steps": {
+            "type": "integer",
+            "default": 500
+          }
+        },
+        "required": []
+      }
     },
     {
       "path": "/tool/game/snake/check",
@@ -64,7 +158,18 @@
       "caps": [
         "read"
       ],
-      "idempotent": true
+      "idempotent": true,
+      "builtin": "game/snake/check",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "default": "snake_game"
+          }
+        },
+        "required": []
+      }
     },
     {
       "path": "/tool/game/snake/demo",
@@ -72,7 +177,26 @@
       "caps": [
         "exec"
       ],
-      "idempotent": false
+      "idempotent": false,
+      "builtin": "game/snake/demo",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "default": "snake_game"
+          },
+          "steps": {
+            "type": "integer",
+            "default": 200
+          },
+          "seed": {
+            "type": "integer",
+            "default": 7
+          }
+        },
+        "required": []
+      }
     },
     {
       "path": "/tool/os/file/append",
@@ -80,7 +204,23 @@
       "caps": [
         "write"
       ],
-      "idempotent": false
+      "idempotent": false,
+      "builtin": "os/file/append",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "content": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "content"
+        ]
+      }
     },
     {
       "path": "/tool/os/file/list",
@@ -88,7 +228,22 @@
       "caps": [
         "read"
       ],
-      "idempotent": true
+      "idempotent": true,
+      "builtin": "os/file/list",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "default": "."
+          },
+          "pattern": {
+            "type": "string",
+            "default": "*"
+          }
+        },
+        "required": []
+      }
     },
     {
       "path": "/tool/os/file/read",
@@ -96,7 +251,27 @@
       "caps": [
         "read"
       ],
-      "idempotent": true
+      "idempotent": true,
+      "builtin": "os/file/read",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "offset": {
+            "type": "integer",
+            "default": 0
+          },
+          "limit": {
+            "type": "integer",
+            "default": 120
+          }
+        },
+        "required": [
+          "path"
+        ]
+      }
     },
     {
       "path": "/tool/os/file/write",
@@ -104,7 +279,23 @@
       "caps": [
         "write"
       ],
-      "idempotent": false
+      "idempotent": false,
+      "builtin": "os/file/write",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "content": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "content"
+        ]
+      }
     },
     {
       "path": "/tool/os/shell/run",
@@ -112,7 +303,23 @@
       "caps": [
         "exec"
       ],
-      "idempotent": false
+      "idempotent": false,
+      "builtin": "os/shell/run",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "command": {
+            "type": "string"
+          },
+          "timeout": {
+            "type": "integer",
+            "default": 20
+          }
+        },
+        "required": [
+          "command"
+        ]
+      }
     }
   ],
   "skills": [
@@ -121,21 +328,25 @@
       "description": "用 pygame + 粒子法做二维液态水仿真：密度约束不可压缩、重力积分、边界碰撞、固体遮挡。用于编写或验收 fluid 项目。",
       "source": ".agent/skills/fluid-particle-sim/SKILL.md",
       "dir": ".agent/skills/fluid-particle-sim",
-      "extra_files": []
+      "extra_files": [],
+      "group": ""
     },
     {
       "name": "incremental-delivery",
       "description": "小步交付并每步验证：先骨架后功能、每次只改一处、改完立即自检、失败先读错误再动手。用于多文件工程任务。",
       "source": ".agent/skills/incremental-delivery/SKILL.md",
       "dir": ".agent/skills/incremental-delivery",
-      "extra_files": []
+      "extra_files": [],
+      "group": ""
     },
     {
       "name": "snake-game-python",
       "description": "用 Python 从零实现可在终端运行的贪吃蛇游戏：固定时间步、无头自检、分层结构。用于编写或验收 snake_game 项目。",
       "source": ".agent/skills/snake-game-python/SKILL.md",
       "dir": ".agent/skills/snake-game-python",
-      "extra_files": []
+      "extra_files": [],
+      "group": ""
     }
-  ]
+  ],
+  "mcp_servers": []
 }
