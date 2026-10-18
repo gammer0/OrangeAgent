@@ -401,18 +401,61 @@ class TestTreeIndex:
         """
         tree = build_tree(store, perms)
         text = tree.tree_index()
-        assert "/skill/mmd" in text
         # 叶子必须可见，否则模型无从知道有哪些工具
         leaves = [p for p in tree.paths if tree.get_node(p).is_leaf]
         for path in leaves:
             assert path in text, f"叶子 {path} 未出现在索引中"
 
+    def test_index_omits_undescribed_groups(self, store: FlatStore, perms) -> None:
+        """无描述的中间节点只是子路径前缀的重复，必须省略。"""
+        from harness.tool_tree import index_text_to_paths
+
+        tree = build_tree(store, perms)
+        shown = set(index_text_to_paths(tree.tree_index()))
+
+        groups = [p for p in tree.paths if not tree.get_node(p).is_leaf]
+        for path in groups:
+            if tree.get_node(path).depth == 1:
+                continue  # L1 资源根恒定出现
+            assert path not in shown, f"无描述分组 {path} 不应出现在索引中"
+
+        # 叶子与所有已存在的 L1 资源根仍然出现
+        leaves = {p for p in tree.paths if tree.get_node(p).is_leaf}
+        assert leaves <= shown
+        roots = {p for p in tree.paths if tree.get_node(p).depth == 1}
+        assert roots <= shown, f"L1 资源根缺失: {roots - shown}"
+
+    def test_index_shows_described_groups(self, store: FlatStore, perms) -> None:
+        """有描述的分组才出现，且带上描述。"""
+        from harness.tool_tree import index_text_to_paths
+
+        tree = build_tree(store, perms, group_descriptions={"skill/mmd": "MMD 骨骼"})
+        text = tree.tree_index()
+        assert "/skill/mmd — MMD 骨骼" in text
+        assert "/skill/mmd" in set(index_text_to_paths(text))
+
+    def test_index_no_false_depth_hint(self, store: FlatStore, perms) -> None:
+        """全展开时不应出现「更深节点」提示（省略的是空分组，不是更深节点）。"""
+        tree = build_tree(store, perms)
+        assert "更深节点" not in tree.tree_index()
+
     def test_index_depth_one_only_l1(self, store: FlatStore, perms) -> None:
-        """``depth=1`` 只列 L1。"""
+        """``depth=1`` 只列 L1（提示行不算条目）。"""
+        from harness.tool_tree import index_text_to_paths
+
         tree = build_tree(store, perms)
         text = tree.tree_index(depth=1)
-        assert "/skill" in text
-        assert "/skill/mmd" not in text
+        roots = {p for p in tree.paths if tree.get_node(p).depth == 1}
+        assert set(index_text_to_paths(text)) == roots
+        # 深层路径不能作为独立条目出现（提示行里提到它们是允许的）
+        assert "/skill/mmd" not in index_text_to_paths(text)
+
+    def test_index_merges_depth_and_fold_hints(self, store: FlatStore, perms) -> None:
+        """深度限制与折叠不能各出一行提示（重复表达同一件事）。"""
+        tree = build_tree(store, perms)
+        text = tree.tree_index(depth=1)
+        hints = [line for line in text.splitlines() if line.startswith("（")]
+        assert len(hints) <= 1, f"提示重复: {hints}"
 
     def test_index_depth_is_monotonic(self, store: FlatStore, perms) -> None:
         """depth 越大条目越多（旧实现 depth=3 与 depth=2 完全相同）。"""

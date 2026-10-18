@@ -523,14 +523,20 @@ class ToolTree:
     def tree_index(self, depth: int = DEFAULT_INDEX_DEPTH) -> str:
         """树索引投影（B6）：按 ``depth`` 展开层级，按 path 字典序。
 
+        可见性规则（**分组必须自证价值**）：
+
+        * **叶子**（真正可调用的工具/skill）一律出现。
+        * **中间节点**只在其有**显式描述**时出现——因为只有描述能提供叶子
+          路径之外的信息（用途说明）。无描述的中间节点只是把子路径的公共
+          前缀重复一遍，属纯噪音，一律省略。
+        * 例外：L1 资源根（``/tool``、``/skill``、``/mcp``）恒定出现，
+          它们标出三类能力的边界。
+
+        其余规则：
+
         * 被拒绝的节点不出现（B5）。
-        * ``depth`` 表示**展开到第几层**（1 = 只列 L1；``0`` = 不限制，全展开）。
-          早期实现只收集 L1+L2，导致 ``depth=3`` 与 ``depth=2``
-          输出完全相同——语义是错的，此处已修正。
-        * 只在节点有描述时输出 ``路径 — 描述``，否则只输出路径。
-          中间节点的占位描述已不再输出（曾占索引体积 31%~95%）。
-        * 条目总数超过 ``DEFAULT_L2_LIMIT`` 时按描述长度升序保留前若干条，
-          超出部分折叠（防止工具数上百时索引膨胀）。
+        * ``depth`` 表示**展开到第几层**（1 = 只列 L1；``0`` = 不限制）。
+        * 条目总数超过 ``DEFAULT_L2_LIMIT`` 时按描述长度升序保留前若干条。
         * 结果只由树结构与权限决定，同一会话内逐字节一致。
         """
         ordered = self.visible_nodes()
@@ -539,15 +545,24 @@ class ToolTree:
         else:
             shown = list(ordered)
 
+        # 分组只在有描述时保留；叶子与 L1 资源根恒定保留
+        shown = [
+            n
+            for n in shown
+            if n.is_leaf or n.depth == 1 or (n.description or "").strip()
+        ]
+
         if len(shown) > DEFAULT_L2_LIMIT:
-            # 保留所有 L1，剩余名额按描述长度（短优先）挑选，避免长描述挤占
-            l1 = [n for n in shown if n.depth == 1]
+            # 保留所有 L1 与有描述的分组，剩余名额按描述长度（短优先）挑选
+            keep = [
+                n for n in shown if n.depth == 1 or not n.is_leaf
+            ]
             rest = sorted(
-                (n for n in shown if n.depth > 1),
+                (n for n in shown if n.depth > 1 and n.is_leaf),
                 key=lambda n: (len(n.description), n.path),
             )
-            budget = max(DEFAULT_L2_LIMIT - len(l1), 0)
-            shown = sorted(l1 + rest[:budget], key=lambda n: n.path)
+            budget = max(DEFAULT_L2_LIMIT - len(keep), 0)
+            shown = sorted(keep + rest[:budget], key=lambda n: n.path)
 
         lines = []
         for node in shown:
@@ -558,9 +573,37 @@ class ToolTree:
             else:
                 lines.append(node.path)
 
-        hidden = len(ordered) - len(shown)
-        if hidden > 0:
-            lines.append(f"（另有 {hidden} 个更深节点，用 tree_query 按上级路径展开）")
+        # 折叠掉的叶子不能凭空消失——否则模型永远不知道它们存在，也没法
+        # tree_query 出来。按所属分组聚合提示，但只列前几个，避免提示本身
+        # 变成新的噪音（工具数多时分组可能上百）。
+        #
+        # 注意：深度限制与折叠可能同时发生，两者都是「去上级路径找」，
+        # 所以合并成一条提示，不重复表达同一件事。
+        shown_set = {n.path for n in shown}
+        folded = [n for n in ordered if n.is_leaf and n.path not in shown_set]
+        depth_hidden = [
+            n for n in ordered if depth and depth > 0 and n.depth > depth
+        ]
+
+        if folded:
+            buckets: dict[str, int] = {}
+            for node in folded:
+                parent = node.path.rsplit("/", 1)[0] or "/"
+                buckets[parent] = buckets.get(parent, 0) + 1
+            listed = sorted(buckets.items())[:5]
+            detail = "、".join(
+                f"{path}" + (f"（{count} 个）" if count > 1 else "")
+                for path, count in listed
+            )
+            if len(buckets) > len(listed):
+                detail += f" 等 {len(buckets)} 个位置"
+            lines.append(
+                f"（另有 {len(folded)} 个工具未展开，可用 tree_query 展开：{detail}）"
+            )
+        elif depth_hidden:
+            lines.append(
+                f"（另有 {len(depth_hidden)} 个更深节点，用 tree_query 按上级路径展开）"
+            )
         return "\n".join(lines)
 
     @property
@@ -925,9 +968,20 @@ def _validate_tree(
 
 
 def index_text_to_paths(text: str) -> list[str]:
-    """从 ``tree_index`` 文本中提取路径（测试与回放用）。"""
+    """从 ``tree_index`` 文本中提取路径（测试与回放用）。
+
+    同时处理两种行：``路径 — 描述`` 与只有 ``路径`` 的行（无描述的节点）。
+    以 ``（`` 开头的提示行不含路径，跳过。
+
+    历史 bug：早期只解析含 `` — `` 的行，导致无描述的路径（L1 资源根、
+    无描述分组）被静默丢弃，用它做的断言会得出错误结论。
+    """
     paths: list[str] = []
     for line in text.splitlines():
-        if " — " in line:
-            paths.append(line.split(" — ", 1)[0])
+        stripped = line.strip()
+        if not stripped or stripped.startswith("（"):
+            continue
+        path = stripped.split(" — ", 1)[0].strip()
+        if path.startswith("/"):
+            paths.append(path)
     return paths
