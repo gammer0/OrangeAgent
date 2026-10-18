@@ -393,13 +393,51 @@ class TestConcurrencyDerivation:
 
 
 class TestTreeIndex:
-    def test_index_contains_only_l1_and_l2_B6(self, store: FlatStore, perms) -> None:
+    def test_index_expands_all_by_default(self, store: FlatStore, perms) -> None:
+        """默认（depth=0）必须全展开，否则模型看不到工具叶子。
+
+        历史 bug：默认 depth=2 时，四层路径的工具一个都不显示，
+        模型只能看到 ``/tool/fluid`` 这类目录名。
+        """
         tree = build_tree(store, perms)
         text = tree.tree_index()
-        assert "/skill" in text
         assert "/skill/mmd" in text
-        assert "/skill/mmd/pose" not in text
-        assert "/skill/mmd/pose/set_keyframe" not in text
+        # 叶子必须可见，否则模型无从知道有哪些工具
+        leaves = [p for p in tree.paths if tree.get_node(p).is_leaf]
+        for path in leaves:
+            assert path in text, f"叶子 {path} 未出现在索引中"
+
+    def test_index_depth_one_only_l1(self, store: FlatStore, perms) -> None:
+        """``depth=1`` 只列 L1。"""
+        tree = build_tree(store, perms)
+        text = tree.tree_index(depth=1)
+        assert "/skill" in text
+        assert "/skill/mmd" not in text
+
+    def test_index_depth_is_monotonic(self, store: FlatStore, perms) -> None:
+        """depth 越大条目越多（旧实现 depth=3 与 depth=2 完全相同）。"""
+        tree = build_tree(store, perms)
+        d1 = len(tree.tree_index(depth=1).splitlines())
+        d2 = len(tree.tree_index(depth=2).splitlines())
+        d9 = len(tree.tree_index(depth=9).splitlines())
+        assert d1 <= d2 <= d9
+
+    def test_index_omits_placeholder_description(self, store: FlatStore, perms) -> None:
+        """中间节点无描述时只输出路径，不拖“由子节点推断”。"""
+        tree = build_tree(store, perms)
+        text = tree.tree_index()
+        assert "由子节点推断" not in text
+
+    def test_index_uses_group_descriptions(self, store: FlatStore, perms) -> None:
+        """显式声明的分组描述要出现在索引里。"""
+        tree = build_tree(
+            store,
+            perms,
+            group_descriptions={"skill": "全部技能", "skill/mmd": "MMD 骨骼"},
+        )
+        text = tree.tree_index()
+        assert "/skill — 全部技能" in text
+        assert "/skill/mmd — MMD 骨骼" in text
 
     def test_index_sorted_by_path_B6(self, store: FlatStore, perms) -> None:
         tree = build_tree(store, perms)
@@ -412,18 +450,22 @@ class TestTreeIndex:
         tree = build_tree(store, perms)
         assert tree.tree_index() == tree.tree_index()
 
-    def test_index_caps_l2_at_40_by_description_length_B6(self) -> None:
+    def test_index_caps_entries_by_description_length_B6(self) -> None:
+        """超过折叠阈值时保留描述最短的若干条（防止工具数上百时膨胀）。"""
+        from harness.tool_tree import DEFAULT_L2_LIMIT, index_text_to_paths
+
+        total = DEFAULT_L2_LIMIT + 20
         entries = [
-            _def(f"t{i:02d}", f"/tool/g{i:02d}", description="x" * (i + 1)) for i in range(50)
+            _def(f"t{i:03d}", f"/tool/g{i:03d}", description="x" * (i + 1))
+            for i in range(total)
         ]
         tree = build_tree(FlatStore(entries), AgentPermissions(agent_id="a"))
-        from harness.tool_tree import index_text_to_paths
 
         paths = index_text_to_paths(tree.tree_index())
         l2 = [p for p in paths if p.count("/") == 2]
-        assert len(l2) == 40
-        # 保留的是描述最短的 40 条（t00..t39）
-        assert l2 == sorted(f"/tool/g{i:02d}" for i in range(40))
+        # L1 占 1 个名额，剩余名额给最短描述
+        assert len(l2) == DEFAULT_L2_LIMIT - 1
+        assert l2 == sorted(f"/tool/g{i:03d}" for i in range(DEFAULT_L2_LIMIT - 1))
 
 
 # ---------------------------------------------------------------------------

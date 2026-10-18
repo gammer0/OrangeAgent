@@ -7,6 +7,7 @@ import json
 import pytest
 
 from harness.capabilities import (
+    MANIFEST_VERSION,
     CapabilityError,
     CapabilityManifest,
     SkillDef,
@@ -184,7 +185,7 @@ def test_manifest_file_is_readable_json(tmp_path):
     manifest.add_skill(SkillDef(name="中文", description="中文描述"))
     save_manifest(manifest, tmp_path)
     data = json.loads(manifest_path(tmp_path).read_text(encoding="utf-8"))
-    assert data["version"] == 1
+    assert data["version"] == MANIFEST_VERSION
     assert data["skills"][0]["name"] == "中文"
 
 

@@ -85,8 +85,21 @@ SideEffectScope = Literal["session", "project", "global"]
 
 L1_DESCRIPTION_LIMIT = 40
 DEEP_DESCRIPTION_LIMIT = 80
-DEFAULT_INDEX_DEPTH = 2
-DEFAULT_L2_LIMIT = 40
+#: 默认索引深度：``0`` 表示不限制（全展开）。
+#:
+#: 曾经默认 2，但工具树往往是 ``/tool/<组>/<子组>/<工具>`` 四层深，
+#: 结果模型只看到 ``/tool/fluid`` 这种目录名，完全看不到有哪些工具可用——
+#: 等于把「有哪些工具」这个最关键的信息省掉了。实测全展开仅增加约 400 token，
+#: 远低于模型因此反复试探的代价。
+DEFAULT_INDEX_DEPTH = 0
+DEFAULT_L2_LIMIT = 120
+
+#: 合成（abstract）节点的占位描述。
+#:
+#: 早期版本把它直接写进索引，导致每个中间节点都拖一句同样的 6 个字——
+#: 在 depth=1 时占索引体积 95%，纯属噪音。现在仅作为内部标记，
+#: 建树末尾会被清空（除非分组有显式描述）。
+SYNTHETIC_DESCRIPTION = "由子节点推断"
 
 
 class ToolTreeError(ValueError):
@@ -246,7 +259,7 @@ class ToolDef:
             caps=["read"],
             permission=parent.permission if parent is not None else Permission(src=head),
             side_effect_scope=parent.side_effect_scope if parent else "session",
-            description="由子节点推断",
+            description=SYNTHETIC_DESCRIPTION,
             synthetic=True,
         )
 
@@ -508,33 +521,46 @@ class ToolTree:
         ]
 
     def tree_index(self, depth: int = DEFAULT_INDEX_DEPTH) -> str:
-        """树索引投影（B6）：默认输出 L1 + L2 两级条目，按 path 字典序。
+        """树索引投影（B6）：按 ``depth`` 展开层级，按 path 字典序。
 
         * 被拒绝的节点不出现（B5）。
-        * L2 条目总数超过 40 时，按 ``description`` 长度升序保留前 40 条，
-          其余折叠到父节点（父节点本身仍以 L1 条目出现）。
-        * 每个条目为带前导斜杠的完整前缀路径。
+        * ``depth`` 表示**展开到第几层**（1 = 只列 L1；``0`` = 不限制，全展开）。
+          早期实现只收集 L1+L2，导致 ``depth=3`` 与 ``depth=2``
+          输出完全相同——语义是错的，此处已修正。
+        * 只在节点有描述时输出 ``路径 — 描述``，否则只输出路径。
+          中间节点的占位描述已不再输出（曾占索引体积 31%~95%）。
+        * 条目总数超过 ``DEFAULT_L2_LIMIT`` 时按描述长度升序保留前若干条，
+          超出部分折叠（防止工具数上百时索引膨胀）。
         * 结果只由树结构与权限决定，同一会话内逐字节一致。
         """
         ordered = self.visible_nodes()
-        l1 = [n for n in ordered if n.depth == 1]
-        l2 = [n for n in ordered if n.depth == 2]
+        if depth and depth > 0:
+            shown = [n for n in ordered if n.depth <= depth]
+        else:
+            shown = list(ordered)
 
-        if len(l2) > DEFAULT_L2_LIMIT:
-            kept = sorted(l2, key=lambda n: (len(n.description), n.path))[:DEFAULT_L2_LIMIT]
-            l2 = sorted(kept, key=lambda n: n.path)
+        if len(shown) > DEFAULT_L2_LIMIT:
+            # 保留所有 L1，剩余名额按描述长度（短优先）挑选，避免长描述挤占
+            l1 = [n for n in shown if n.depth == 1]
+            rest = sorted(
+                (n for n in shown if n.depth > 1),
+                key=lambda n: (len(n.description), n.path),
+            )
+            budget = max(DEFAULT_L2_LIMIT - len(l1), 0)
+            shown = sorted(l1 + rest[:budget], key=lambda n: n.path)
 
-        shown = sorted(l1 + l2, key=lambda n: n.path)
+        lines = []
+        for node in shown:
+            description = (node.description or "").strip()
+            if description:
+                limit = _limit_for_path(node.path)
+                lines.append(f"{node.path} — {truncate_description(description, limit)}")
+            else:
+                lines.append(node.path)
 
-        if depth == 1:
-            shown = [n for n in shown if n.depth == 1]
-
-        lines = [
-            f"{n.path} — {truncate_description(n.description, _limit_for_path(n.path))}"
-            for n in shown
-        ]
-        if depth >= DEFAULT_INDEX_DEPTH and len(ordered) - len(shown) > 0:
-            lines.append("（更深层节点需调用上级路径查询）")
+        hidden = len(ordered) - len(shown)
+        if hidden > 0:
+            lines.append(f"（另有 {hidden} 个更深节点，用 tree_query 按上级路径展开）")
         return "\n".join(lines)
 
     @property
@@ -645,7 +671,12 @@ def tree_query(
 # ---------------------------------------------------------------------------
 
 
-def build_tree(flat_store: FlatStore, permissions: AgentPermissions | None = None) -> ToolTree:
+def build_tree(
+    flat_store: FlatStore,
+    permissions: AgentPermissions | None = None,
+    *,
+    group_descriptions: Mapping[str, str] | None = None,
+) -> ToolTree:
     """按 §4.9.1 从扁平存储构建工具树。
 
     算法：
@@ -656,6 +687,12 @@ def build_tree(flat_store: FlatStore, permissions: AgentPermissions | None = Non
     4. 末段绑定 ``tool_id`` / ``schema`` / ``permission``；
     5. 中间节点无显式条目时自动合成 ``ToolDef``（B20，不写入 FlatStore）；
     6. 派生 ``kind``（B21）并整体校验（B22）。
+
+    Args:
+        flat_store: 扁平存储（唯一真源）。
+        permissions: 权限表；省略时为空表（全部允许）。
+        group_descriptions: ``group_id -> 描述``，如 ``{"tool/os": "本机文件"}``。
+            中间节点优先用这里的描述；未提供时留空（索引只显示路径，不占 token）。
 
     Raises:
         ToolTreeError: 任一构建期校验（B1/B2/B3/B4/B9/B10/B19）失败，拒绝建树。
@@ -729,6 +766,12 @@ def build_tree(flat_store: FlatStore, permissions: AgentPermissions | None = Non
             node.description = synth.description
         if node.kind == "abstract":
             node.schema = dict(EMPTY_SCHEMA)
+            # 分组描述优先用显式声明；未声明则留空，索引只显示路径
+            declared = (group_descriptions or {}).get(node.path.lstrip("/"))
+            if declared:
+                node.description = declared
+            elif node.description == SYNTHETIC_DESCRIPTION:
+                node.description = ""
         node.description = truncate_description(node.description, _limit_for_path(node.path))
 
     # 合成条目只存在于树的私有视图（不进 FlatStore，B20），供 resolve 与校验使用
