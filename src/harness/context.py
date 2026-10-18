@@ -262,7 +262,9 @@ class ContextAssembler:
                 level,
                 self.summarizer,
                 keep_records=keep,
-                watermark=self.watermark,
+                # ponytail: 记账权统一在 assemble——compress 内部记账会让
+                # "压了但没效果"也被计为已用，导致剩余水位无法再尝试。
+                watermark=None,
             )
         except ValueError as exc:
             # 水位已记账或记录不足以切分：无损退化，不阻断主流程（I4）
@@ -279,9 +281,18 @@ class ContextAssembler:
         if clear_trace_state is not None:
             clear_trace_state()
 
-        # ponytail: compress() 在"记录不足以切分"时会原样返回同一个列表，
-        # 此时不能报 compressed=True——否则上层以为压了，实际没压。
-        actually_compressed = compressed_messages is not history
+        # ponytail: compress() 在"记录不足以切分"时返回 ``list(messages)``——
+        # 一个新的浅拷贝对象，用 ``is not history`` 判断会永远为 True，
+        # 导致重复报 compressed 并消耗水位，实测会无限循环。
+        # 因此按「长度或内容是否真的变化」判断。
+        actually_compressed = len(compressed_messages) != len(history) or any(
+            before is not after
+            for before, after in zip(history, compressed_messages, strict=False)
+        )
+        # ponytail: 无论压缩是否真的生效都要记账。否则 compress() 因
+        # "记录不足以切分"原样返回时，judge() 会反复返回同一水位，
+        # 永远推进不到 session_end（实测会卡在 compress_1 空转）。
+        self.watermark.mark_compressed(level)
         return AssembleResult(
             messages=compressed_messages,
             system=_system_of(compressed_messages),

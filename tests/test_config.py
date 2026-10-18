@@ -64,7 +64,7 @@ class TestLoadConfig:
 
         assert config.model == "deepseek-chat"
         assert config.temperature == 0.7
-        assert config.max_tokens == 4096
+        assert config.max_tokens == 8192
         assert config.max_retries == 2
 
     def test_missing_api_key_raises(self, monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
