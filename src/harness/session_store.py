@@ -1,11 +1,12 @@
-"""会话层 SQLite 持久化（H6–H9、H13、H14）。
+"""Session-layer SQLite persistence (H6-H9, H13, H14).
 
-对应文档：docs/02-数据结构设计/02-会话层.md §2.3
+See docs/02-data-structures/02-session-layer.md §2.3.
 
-* 数据库位置：``<workdir>/.agent/harness.db``
-* ``WAL`` 模式，每线程独立连接（``threading.local``）
-* ``SystemMsg`` **不入库**（H6）
-* 事务单元是**单个 ``ExecGroup``**：一组消息同事务提交（H7）
+* Database location: ``<workdir>/.agent/harness.db``
+* ``WAL`` mode, one connection per thread (``threading.local``)
+* ``SystemMsg`` is **never persisted** (H6)
+* The transaction unit is a **single ``ExecGroup``**: one group commits in one
+  transaction (H7)
 """
 
 from __future__ import annotations
@@ -39,10 +40,10 @@ __all__ = [
     "SessionStore",
 ]
 
-#: 数据库相对于工作目录的位置
+#: Location of the database relative to the working directory
 DB_RELATIVE_PATH = Path(".agent") / "harness.db"
 
-#: 建表 SQL，与文档 §2.3 逐字一致
+#: Schema SQL, verbatim from design doc §2.3
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS sessions (
     session_id   TEXT PRIMARY KEY,
@@ -50,17 +51,17 @@ CREATE TABLE IF NOT EXISTS sessions (
     created_at   REAL NOT NULL,
     updated_at   REAL NOT NULL,
     status       TEXT NOT NULL,     -- active | idle | ended
-    watermark    TEXT               -- JSON 序列化，可空
+    watermark    TEXT               -- JSON serialized; nullable
 );
 
 CREATE TABLE IF NOT EXISTS messages (
     session_id   TEXT NOT NULL,
-    seq          INTEGER NOT NULL,  -- 会话内单调递增
+    seq          INTEGER NOT NULL,  -- monotonic within a session
     type         TEXT NOT NULL,     -- user | assistant | tool
-    content      TEXT,              -- 可空（assistant 纯工具调用）
-    tool_calls   TEXT,              -- JSON 字符串，仅 assistant
-    tool_call_id TEXT,              -- 仅 tool
-    name         TEXT,              -- 仅 tool，内部字段
+    content      TEXT,              -- nullable (assistant with tool calls only)
+    tool_calls   TEXT,              -- JSON string, assistant only
+    tool_call_id TEXT,              -- tool only
+    name         TEXT,              -- tool only; internal field
     created_at   REAL NOT NULL,
     PRIMARY KEY (session_id, seq),
     FOREIGN KEY (session_id) REFERENCES sessions(session_id)
@@ -69,13 +70,14 @@ CREATE TABLE IF NOT EXISTS messages (
 
 MessageType = Literal["user", "assistant", "tool"]
 
-#: 仅供 ``validate_messages`` 使用的占位 SystemMsg（不落库、不返回，见 H6）
+#: Placeholder SystemMsg used only by ``validate_messages`` (never persisted,
+#: never returned; see H6)
 _VALIDATION_SYSTEM_STUB = SystemMsg(content="<validation-stub>")
 
 
 @dataclass(frozen=True)
 class StoredMessage:
-    """``messages`` 表一行的读取视图。"""
+    """Read view of one row in the ``messages`` table."""
 
     session_id: str
     seq: int
@@ -89,15 +91,17 @@ class StoredMessage:
 
 @dataclass(frozen=True)
 class RestoredSession:
-    """从 SQLite 重建出的会话数据（**不含** ``SystemMsg``，H6）。
+    """Session data rebuilt from SQLite (**without** the ``SystemMsg``, H6).
 
     Attributes:
-        record: ``sessions`` 行。
-        messages: 按 ``seq`` 升序的消息，**已通过 ``validate_messages``**。
-            恢复流程的第 4 步（重新装配 ``SystemMsg``）由上下文层完成，
-            因此这里的首条是已存在的 ``SystemMsg`` 或历史首条用户消息。
-        delivered: 恒为空集合占位，满足 H8。
-        discovered: 恒为空字典占位，满足 H8。
+        record: The ``sessions`` row.
+        messages: Messages in ascending ``seq`` order, **already validated by
+            ``validate_messages``**. Step 4 of the restore flow (re-assembling
+            the ``SystemMsg``) is done by the context layer, so the first item
+            here is either an existing ``SystemMsg`` or the first historical
+            user message.
+        delivered: Always an empty set placeholder, satisfying H8.
+        discovered: Always an empty dict placeholder, satisfying H8.
     """
 
     record: SessionRecord
@@ -107,35 +111,40 @@ class RestoredSession:
 
 
 class SessionStore:
-    """SQLite 会话存储。
+    """SQLite session storage.
 
-    每线程独立连接（文档 §2.3），连接使用 ``check_same_thread=False`` 关闭
-    sqlite3 自带检查，改由 ``threading.local`` 保证线程隔离。
+    One connection per thread (design doc §2.3); connections use
+    ``check_same_thread=False`` to disable sqlite3's own check and rely on
+    ``threading.local`` for thread isolation instead.
     """
 
     def __init__(self, workdir: str | Path) -> None:
-        """打开（必要时创建）工作目录下的数据库。
+        """Open (creating if needed) the database in the working directory.
 
         Args:
-            workdir: 工作目录；数据库位于 ``<workdir>/.agent/harness.db``。
+            workdir: Working directory; the database lives at
+                ``<workdir>/.agent/harness.db``.
         """
         self.workdir = Path(workdir)
         self.db_path = self.workdir / DB_RELATIVE_PATH
         self._local = threading.local()
-        # 首次建库（WAL + 建表）的串行化锁：仅保护初始化，不保护日常读写
+        # Serializes first-time database creation (WAL + schema): protects
+        # initialization only, not day-to-day reads and writes.
         self._init_lock = threading.Lock()
-        # seq 分配串行化锁（H9）：保护 ``MAX(seq)`` 读-改-写
+        # Serializes seq allocation (H9): guards the MAX(seq) read-modify-write.
         self._write_lock = threading.Lock()
 
     # ------------------------------------------------------------------
-    # 连接管理
+    # Connection management
     # ------------------------------------------------------------------
 
     def _connect(self) -> sqlite3.Connection:
-        """返回当前线程的连接，首次调用时建库并启用 WAL。
+        """Return the current thread's connection, creating the DB and enabling WAL on first use.
 
-        并发首次建连时，``PRAGMA journal_mode=WAL`` 可能因其他线程正在建库
-        而报 ``database is locked``；这里用 ``timeout`` + 建库串行化处理。
+        When several threads connect for the first time concurrently,
+        ``PRAGMA journal_mode=WAL`` can fail with ``database is locked`` because
+        another thread is still creating the DB; a ``timeout`` plus serialized
+        initialization handles that.
         """
         conn: sqlite3.Connection | None = getattr(self._local, "conn", None)
         if conn is not None:
@@ -144,7 +153,8 @@ class SessionStore:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(str(self.db_path), check_same_thread=False, timeout=30.0)
         conn.row_factory = sqlite3.Row
-        # 建库（含 WAL 切换与建表）必须串行，否则并发首次连接会互相抢锁。
+        # Database creation (WAL switch and schema) must be serialized, otherwise
+        # concurrent first connections fight over the lock.
         with self._init_lock:
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA foreign_keys=ON")
@@ -154,7 +164,7 @@ class SessionStore:
         return conn
 
     def close(self) -> None:
-        """关闭当前线程的连接（幂等）。"""
+        """Close the current thread's connection (idempotent)."""
         conn: sqlite3.Connection | None = getattr(self._local, "conn", None)
         if conn is not None:
             conn.close()
@@ -162,16 +172,16 @@ class SessionStore:
 
     @property
     def journal_mode(self) -> str:
-        """当前数据库的 ``journal_mode``（供测试断言 WAL 生效）。"""
+        """The database's current ``journal_mode`` (lets tests assert WAL is active)."""
         row = self._connect().execute("PRAGMA journal_mode").fetchone()
         return str(row[0]).lower()
 
     # ------------------------------------------------------------------
-    # sessions 表
+    # sessions table
     # ------------------------------------------------------------------
 
     def upsert_session(self, record: SessionRecord) -> None:
-        """写入或更新 ``sessions`` 行。"""
+        """Insert or update a ``sessions`` row."""
         watermark_json = (
             json.dumps(record.watermark.to_json(), ensure_ascii=False, sort_keys=True)
             if record.watermark is not None
@@ -207,7 +217,7 @@ class SessionStore:
         status: SessionStatus,
         watermark: Watermark | None = None,
     ) -> None:
-        """更新会话状态（及可选的水位快照）与 ``updated_at``。"""
+        """Update the session status (and optional watermark snapshot) plus ``updated_at``."""
         watermark_json = (
             json.dumps(watermark.to_json(), ensure_ascii=False, sort_keys=True)
             if watermark is not None
@@ -231,7 +241,7 @@ class SessionStore:
                 )
 
     def get_session(self, session_id: str) -> SessionRecord | None:
-        """读取 ``sessions`` 行；不存在返回 ``None``。"""
+        """Read a ``sessions`` row; ``None`` if absent."""
         row = (
             self._connect()
             .execute("SELECT * FROM sessions WHERE session_id = ?", (session_id,))
@@ -253,7 +263,7 @@ class SessionStore:
         )
 
     def list_sessions(self) -> list[SessionRecord]:
-        """按 ``updated_at`` 升序列出全部会话行。"""
+        """List every session row, ascending by ``updated_at``."""
         rows = (
             self._connect()
             .execute("SELECT * FROM sessions ORDER BY updated_at ASC, session_id ASC")
@@ -277,7 +287,7 @@ class SessionStore:
         return records
 
     # ------------------------------------------------------------------
-    # messages 表
+    # messages table
     # ------------------------------------------------------------------
 
     def append_messages(
@@ -287,35 +297,42 @@ class SessionStore:
         *,
         commit: bool = True,
     ) -> list[int]:
-        """追加一批消息，**同事务**提交（H7）。
+        """Append a batch of messages, committed **in one transaction** (H7).
 
-        典型用法：一个 ``ExecGroup`` 完成后，把该组全部 ``ToolMsg`` 一次写入；
-        补占位（3e）同理。``commit=False`` 时并入调用方事务，由调用方在
-        ``with conn:`` 块内统一提交。
+        Typical usage: once an ``ExecGroup`` finishes, write all of that group's
+        ``ToolMsg`` values at once; the same applies to ``3e`` placeholders. With
+        ``commit=False`` the writes join the caller's transaction, which the
+        caller commits inside its own ``with conn:`` block.
 
         Args:
-            session_id: 会话 id。
-            messages: 待写入消息，按给定顺序分配连续 ``seq``（H9）。
-            commit: 是否自行提交。``False`` 时依赖外层事务。
+            session_id: Session id.
+            messages: Messages to write, assigned consecutive ``seq`` values in
+                the given order (H9).
+            commit: Whether to commit here. ``False`` relies on an outer
+                transaction.
 
         Returns:
-            本批消息分配的 ``seq`` 列表。
+            The ``seq`` values assigned to this batch.
 
         Raises:
-            MessageInvariantError: 出现 ``SystemMsg``（H6：SystemMsg 不入库）。
+            MessageInvariantError: A ``SystemMsg`` appears (H6: SystemMsg is
+                never persisted).
         """
         if not messages:
             return []
 
         for msg in messages:
             if isinstance(msg, SystemMsg):
-                raise MessageInvariantError("A1", "H6: SystemMsg 不入库，不得写入 messages 表")
+                raise MessageInvariantError(
+                    "A1", "H6: SystemMsg is never persisted; it must not enter the messages table"
+                )
 
         conn = self._connect()
         now = time.time()
 
-        # H9：seq 必须单调且无空洞。``MAX(seq)`` 读取与插入必须原子，
-        # 否则并发写同一会话会争用同一 seq 触发主键冲突。
+        # H9: seq must be monotonic and gapless. Reading and inserting around
+        # MAX(seq) must be atomic, otherwise concurrent writes to the same
+        # session race for the same seq and hit a primary-key conflict.
         with self._write_lock:
             if commit:
                 with conn:
@@ -356,15 +373,16 @@ class SessionStore:
         group_index: int,
         messages: Sequence[Message],
     ) -> list[int]:
-        """写入单个 ``ExecGroup`` 的全部消息并原子提交（H7）。
+        """Write all messages of a single ``ExecGroup`` and commit atomically (H7).
 
-        ``group_index`` 仅用于诊断日志，不落库；事务边界才是语义所在。
+        ``group_index`` is used for diagnostic logs only and is not persisted;
+        the transaction boundary is what carries the semantics.
         """
         del group_index
         return self.append_messages(session_id, messages)
 
     def load_messages(self, session_id: str) -> list[StoredMessage]:
-        """按 ``seq`` 升序读取某会话全部消息行。"""
+        """Read every message row of a session, ascending by ``seq``."""
         rows = (
             self._connect()
             .execute(
@@ -388,7 +406,7 @@ class SessionStore:
         ]
 
     def next_seq(self, session_id: str) -> int:
-        """返回下一个可用 ``seq``（会话内单调递增，H9）。"""
+        """Return the next available ``seq`` (monotonic within the session, H9)."""
         row = (
             self._connect()
             .execute(
@@ -400,22 +418,24 @@ class SessionStore:
         return int(row["max_seq"]) + 1
 
     # ------------------------------------------------------------------
-    # 恢复（文档 §2.3 五步）
+    # Restore (design doc §2.3, five steps)
     # ------------------------------------------------------------------
 
     def restore(self, session_id: str) -> RestoredSession | None:
-        """从 SQLite 重建会话数据。
+        """Rebuild session data from SQLite.
 
-        步骤：
+        Steps:
 
-        1. 读 ``sessions`` 行（不存在返回 ``None``）；
-        2. ``SELECT messages ... ORDER BY seq``；
-        3. ``validate_messages`` 校验序列；
-        4. **不**在此装配 ``SystemMsg``（由上下文层按当前工具树重装，H6）；
-        5. 返回空的 ``delivered`` 与 ``discovered`` 占位（H8 / H14）。
+        1. Read the ``sessions`` row (return ``None`` if absent);
+        2. ``SELECT messages ... ORDER BY seq``;
+        3. Validate the sequence with ``validate_messages``;
+        4. Do **not** assemble the ``SystemMsg`` here (the context layer rebuilds
+           it from the current tool tree, H6);
+        5. Return empty ``delivered`` and ``discovered`` placeholders (H8 / H14).
 
         Raises:
-            MessageInvariantError: 库内消息序列违反 A 组约束。
+            MessageInvariantError: The stored message sequence violates group-A
+                constraints.
         """
         record = self.get_session(session_id)
         if record is None:
@@ -423,9 +443,11 @@ class SessionStore:
 
         messages = [row_to_message(row) for row in self.load_messages(session_id)]
         if messages:
-            # SystemMsg 不入库（H6），但 validate_messages 要求首条为 SystemMsg（A1）。
-            # 这里用临时占位对象完成序列级校验，不并入返回值；真正的 SystemMsg 由
-            # 上下文层按当前工具树重新装配（恢复流程第 4 步）。
+            # The SystemMsg is not persisted (H6), but validate_messages requires
+            # the first message to be a SystemMsg (A1). A temporary stub lets us
+            # run the sequence-level check without adding it to the returned
+            # value; the real SystemMsg is re-assembled by the context layer from
+            # the current tool tree (restore step 4).
             validate_messages([_VALIDATION_SYSTEM_STUB, *messages])
 
         return RestoredSession(
@@ -437,7 +459,7 @@ class SessionStore:
 
 
 # ----------------------------------------------------------------------
-# 行 ↔ 消息映射
+# Row <-> message mapping
 # ----------------------------------------------------------------------
 
 
@@ -447,7 +469,7 @@ def _to_row(
     msg: Message,
     now: float,
 ) -> tuple[str, int, str, str | None, str | None, str | None, str | None, float]:
-    """把消息拍平成 ``messages`` 表的一行。"""
+    """Flatten a message into one row of the ``messages`` table."""
     if isinstance(msg, UserMsg):
         return (session_id, seq, "user", msg.content, None, None, None, now)
     if isinstance(msg, AssistantMsg):
@@ -459,11 +481,11 @@ def _to_row(
         return (session_id, seq, "assistant", msg.content, tool_calls, None, None, now)
     if isinstance(msg, ToolMsg):
         return (session_id, seq, "tool", msg.content, None, msg.tool_call_id, msg.name, now)
-    raise MessageInvariantError("A1", f"不支持的入库消息类型: {type(msg).__name__}")
+    raise MessageInvariantError("A1", f"unsupported message type for persistence: {type(msg).__name__}")
 
 
 def row_to_message(row: StoredMessage) -> Message:
-    """把 ``messages`` 表一行还原为消息对象。"""
+    """Restore one ``messages`` row into a message object."""
     if row.type == "user":
         return UserMsg(content=row.content or "")
     if row.type == "assistant":
@@ -479,9 +501,9 @@ def row_to_message(row: StoredMessage) -> Message:
             name=row.name or "",
             content=row.content or "",
         )
-    raise MessageInvariantError("A1", f"未知消息类型列值: {row.type!r}")
+    raise MessageInvariantError("A1", f"unknown message type column value: {row.type!r}")
 
 
 def iter_rows(rows: Iterable[StoredMessage]) -> Iterable[Message]:  # pragma: no cover
-    """辅助：批量把行还原为消息（保留供上层迁移脚本使用）。"""
+    """Helper: restore rows in bulk (kept for upper-layer migration scripts)."""
     return (row_to_message(row) for row in rows)
