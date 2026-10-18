@@ -25,6 +25,7 @@ ROOT = Path(__file__).resolve().parent.parent
 SRC = ROOT / "src" / "harness"
 TESTS = ROOT / "tests"
 DOCS = ROOT / "docs"
+APPS = ROOT / "apps"
 
 ALLOWED_DEPENDENCIES = {
     "httpx",
@@ -32,8 +33,12 @@ ALLOWED_DEPENDENCIES = {
     "pydantic",
     "python-dotenv",
     "rich",
+    # Web 服务层（仅 apps/ 使用，核心 src/harness 仍禁止导入）
+    "fastapi",
+    "uvicorn",
 }
 
+#: 核心编排层禁止的模块。设计原则：核心零 Web 框架、零编排框架。
 BANNED_MODULES = {
     "langchain",
     "langchain_core",
@@ -44,7 +49,12 @@ BANNED_MODULES = {
     "celery",
     "django",
     "sqlalchemy",
+    "uvicorn",
+    "starlette",
 }
+
+#: 服务层（apps/）允许的 Web 框架；其余禁止项仍然生效。
+ALLOWED_WEB_MODULES_IN_APPS = {"fastapi", "starlette", "uvicorn"}
 
 # 约束编号形如 A1 / A0a / G12 / B25 / 3a；只取大写字母前缀的文档约束
 CONSTRAINT_PATTERN = re.compile(r"\b([A-K])(\d+)(?![\d])\b")
@@ -70,24 +80,50 @@ def _iter_python_files(path: Path) -> list[Path]:
     return sorted(p for p in path.rglob("*.py") if "__pycache__" not in p.parts)
 
 
-def check_import_boundaries() -> list[str]:
-    """校验源码导入边界：禁止 tests 与框架库。"""
-    problems: list[str] = []
-    for file in _iter_python_files(SRC):
-        tree = ast.parse(file.read_text(encoding="utf-8"), filename=str(file))
-        for node in ast.walk(tree):
-            modules: list[str] = []
-            if isinstance(node, ast.Import):
-                modules = [alias.name for alias in node.names]
-            elif isinstance(node, ast.ImportFrom) and node.module:
-                modules = [node.module]
+def _scan_imports(file: Path) -> set[str]:
+    """返回文件导入的顶层模块名集合。"""
+    tree = ast.parse(file.read_text(encoding="utf-8"), filename=str(file))
+    modules: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            modules.update(alias.name.split(".")[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            modules.add(node.module.split(".")[0])
+    return modules
 
-            for module in modules:
-                head = module.split(".")[0]
-                if head == "tests":
-                    problems.append(f"{file.relative_to(ROOT)}: 源码不得导入 tests")
-                if head in BANNED_MODULES:
-                    problems.append(f"{file.relative_to(ROOT)}: 使用了禁止的框架 {head}")
+
+def check_import_boundaries() -> list[str]:
+    """校验导入边界（按目录区分白名单）。
+
+    * ``src/harness``：核心层，``BANNED_MODULES`` 全部禁止，且不得导入 ``tests``。
+    * ``apps/``：服务层，允许 FastAPI/Starlette/Uvicorn，其余编排框架仍禁止，
+      且不得直接导入 ``tests``。
+
+    Returns:
+        违规描述列表；空列表表示通过。
+    """
+    problems: list[str] = []
+
+    for file in _iter_python_files(SRC):
+        for module in _scan_imports(file):
+            if module == "tests":
+                problems.append(f"{file.relative_to(ROOT)}: 源码不得导入 tests")
+            if module in BANNED_MODULES:
+                problems.append(
+                    f"{file.relative_to(ROOT)}: 核心层禁止导入 {module}"
+                    "（Web 服务请放在 apps/）"
+                )
+
+    if APPS.is_dir():
+        for file in _iter_python_files(APPS):
+            for module in _scan_imports(file):
+                if module == "tests":
+                    problems.append(f"{file.relative_to(ROOT)}: 应用层不得导入 tests")
+                if module in ALLOWED_WEB_MODULES_IN_APPS:
+                    continue
+                if module in BANNED_MODULES:
+                    problems.append(f"{file.relative_to(ROOT)}: 应用层禁止导入 {module}")
+
     return problems
 
 

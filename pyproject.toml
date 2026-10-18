@@ -3,11 +3,13 @@ name = "harness"
 version = "0.1.0"
 requires-python = ">=3.12"
 dependencies = [
+    "fastapi>=0.143.5",
     "httpx>=0.28.1",
     "openai>=3.33.0",
     "pydantic>=2.14.1",
     "python-dotenv>=1.2.4",
     "rich>=15.0.0",
+    "uvicorn[standard]>=0.54.0",
 ]
 
 [dependency-groups]
@@ -28,7 +30,7 @@ packages = ["src/harness"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["src"]
+pythonpath = ["src", "."]
 
 [tool.ruff]
 line-length = 100

@@ -1,0 +1,725 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Harness Console</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #171a21;
+    --panel-2: #1e222b;
+    --border: #2a2f3a;
+    --text: #e6e9ef;
+    --muted: #8b93a3;
+    --accent: #4a8cff;
+    --ok: #3ecf8e;
+    --warn: #f5a524;
+    --err: #ef4444;
+    --mono: ui-monospace, "Cascadia Code", Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg); color: var(--text);
+    font: 14px/1.6 -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+    display: grid; grid-template-columns: 260px 1fr 340px;
+    grid-template-rows: 48px 1fr;
+    grid-template-areas: "head head head" "sessions chat side";
+    overflow: hidden;
+  }
+
+  /* ---- Header ---- */
+  header {
+    grid-area: head; display: flex; align-items: center; gap: 12px;
+    padding: 0 14px; background: var(--panel); border-bottom: 1px solid var(--border);
+  }
+  header h1 { font-size: 14px; margin: 0; font-weight: 600; letter-spacing: .4px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+  .dot.ok { background: var(--ok); } .dot.err { background: var(--err); }
+  .spacer { flex: 1; }
+  select, button, input, textarea {
+    font: inherit; color: var(--text); background: var(--panel-2);
+    border: 1px solid var(--border); border-radius: 6px; padding: 6px 9px;
+  }
+  button { cursor: pointer; transition: border-color .15s, background .15s; }
+  button:hover { border-color: var(--accent); }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.danger { color: var(--err); }
+
+  /* ---- Sessions ---- */
+  #sessions {
+    grid-area: sessions; background: var(--panel); border-right: 1px solid var(--border);
+    display: flex; flex-direction: column; min-height: 0;
+  }
+  #sessions .top { padding: 10px; border-bottom: 1px solid var(--border); }
+  #sessions .top button { width: 100%; }
+  #session-list { overflow-y: auto; flex: 1; padding: 6px; }
+  .sess {
+    padding: 8px 10px; border-radius: 6px; cursor: pointer; margin-bottom: 4px;
+    border: 1px solid transparent; display: flex; gap: 8px; align-items: center;
+  }
+  .sess:hover { background: var(--panel-2); }
+  .sess.active { background: var(--panel-2); border-color: var(--accent); }
+  .sess .id { font-family: var(--mono); font-size: 12px; flex: 1; overflow: hidden; text-overflow: ellipsis; }
+  .sess .st { font-size: 11px; color: var(--muted); }
+  .sess .st.running { color: var(--accent); }
+  .sess .st.done { color: var(--ok); }
+  .sess .st.error { color: var(--err); }
+  .sess .kill { opacity: 0; color: var(--muted); padding: 0 4px; background: none; border: none; }
+  .sess:hover .kill { opacity: 1; }
+
+  /* ---- Chat ---- */
+  #chat { grid-area: chat; display: flex; flex-direction: column; min-height: 0; }
+  #stream { flex: 1; overflow-y: auto; padding: 16px 20px; }
+  .msg { margin-bottom: 16px; display: flex; gap: 10px; }
+  .msg .avatar {
+    width: 26px; height: 26px; border-radius: 6px; flex: none;
+    display: grid; place-items: center; font-size: 11px; font-weight: 700;
+    background: var(--panel-2); color: var(--muted);
+  }
+  .msg.user .avatar { background: #26344d; color: #9db8e8; }
+  .msg.assistant .avatar { background: #24382f; color: var(--ok); }
+  .msg .body { min-width: 0; flex: 1; }
+  .msg .body .text { white-space: pre-wrap; word-break: break-word; }
+  .msg .meta { font-size: 11px; color: var(--muted); margin-top: 4px; font-family: var(--mono); }
+
+  .tool-card {
+    border: 1px solid var(--border); border-left: 3px solid var(--warn);
+    background: var(--panel); border-radius: 6px; padding: 8px 10px;
+    margin: 8px 0; font-family: var(--mono); font-size: 12px;
+  }
+  .tool-card.err { border-left-color: var(--err); }
+  .tool-card .path { color: var(--warn); }
+  .tool-card .path.err { color: var(--err); }
+  .tool-card pre {
+    margin: 6px 0 0; white-space: pre-wrap; word-break: break-word;
+    color: var(--muted); max-height: 180px; overflow: auto;
+  }
+
+  .thinking { display: flex; gap: 4px; padding: 6px 0; }
+  .thinking span {
+    width: 6px; height: 6px; border-radius: 50%; background: var(--accent);
+    animation: pulse 1.2s infinite;
+  }
+  .thinking span:nth-child(2) { animation-delay: .15s; }
+  .thinking span:nth-child(3) { animation-delay: .3s; }
+  @keyframes pulse { 0%, 100% { opacity: .25; } 50% { opacity: 1; } }
+
+  #composer { border-top: 1px solid var(--border); padding: 10px 14px; background: var(--panel); }
+  #composer .row { display: flex; gap: 8px; align-items: flex-end; }
+  #input {
+    flex: 1; resize: none; min-height: 42px; max-height: 160px;
+    font-family: inherit; line-height: 1.5;
+  }
+  #composer .hint { font-size: 11px; color: var(--muted); margin-top: 6px; }
+  kbd {
+    background: var(--panel-2); border: 1px solid var(--border);
+    border-radius: 4px; padding: 0 4px; font-family: var(--mono); font-size: 11px;
+  }
+
+  /* ---- Side ---- */
+  #side {
+    grid-area: side; background: var(--panel); border-left: 1px solid var(--border);
+    display: flex; flex-direction: column; min-height: 0;
+  }
+  .tabs { display: flex; border-bottom: 1px solid var(--border); }
+  .tabs button {
+    flex: 1; border: none; border-radius: 0; background: none;
+    padding: 10px; color: var(--muted); border-bottom: 2px solid transparent;
+  }
+  .tabs button.active { color: var(--text); border-bottom-color: var(--accent); }
+  .tab-body { flex: 1; overflow-y: auto; padding: 12px; }
+  .tab-body.hidden { display: none; }
+
+  .meter { height: 6px; background: var(--panel-2); border-radius: 3px; overflow: hidden; margin: 6px 0 2px; }
+  .meter > i { display: block; height: 100%; background: var(--ok); width: 0; transition: width .3s; }
+  .meter.warn > i { background: var(--warn); }
+  .meter.err > i { background: var(--err); }
+  .kv { display: flex; justify-content: space-between; font-size: 12px; padding: 3px 0; }
+  .kv .k { color: var(--muted); }
+  .kv .v { font-family: var(--mono); }
+
+  .trace-item { font-size: 12px; padding: 6px 0; border-bottom: 1px solid var(--border); }
+  .trace-item .h { display: flex; gap: 6px; align-items: center; }
+  .trace-item .t { font-family: var(--mono); color: var(--muted); font-size: 11px; }
+  .tag {
+    font-size: 10px; padding: 0 5px; border-radius: 3px; font-family: var(--mono);
+    background: var(--panel-2); color: var(--muted); text-transform: uppercase;
+  }
+  .tag.assistant { color: var(--ok); } .tag.tool { color: var(--warn); }
+  .tag.route { color: var(--accent); } .tag.error { color: var(--err); }
+  .tag.compress { color: #b78bfa; }
+
+  .ctx-item { font-size: 12px; padding: 6px 8px; border-radius: 5px; margin-bottom: 4px; background: var(--panel-2); }
+  .ctx-item .role { font-family: var(--mono); font-size: 10px; color: var(--muted); text-transform: uppercase; }
+  .ctx-item .c { white-space: pre-wrap; word-break: break-word; max-height: 90px; overflow: auto; margin-top: 2px; }
+
+  .empty { color: var(--muted); font-size: 12px; text-align: center; padding: 24px 8px; }
+  #banner {
+    display: none; margin: 10px 14px; padding: 8px 10px; border-radius: 6px;
+    background: #3a2020; border: 1px solid var(--err); color: #ffb4b4; font-size: 12px;
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>HARNESS</h1>
+  <span class="dot" id="health-dot" title="服务状态"></span>
+  <span id="health-text" style="color:var(--muted);font-size:12px">连接中…</span>
+  <div class="spacer"></div>
+  <label style="font-size:12px;color:var(--muted)">模型</label>
+  <select id="model-select" title="新建会话使用的模型"></select>
+  <button id="new-session" class="primary">新建会话</button>
+</header>
+
+<aside id="sessions">
+  <div class="top">
+    <div class="kv"><span class="k">会话</span><span class="v" id="sess-count">0</span></div>
+  </div>
+  <div id="session-list"><div class="empty">暂无会话</div></div>
+</aside>
+
+<main id="chat">
+  <div id="banner"></div>
+  <div id="stream"><div class="empty">选择或新建一个会话开始</div></div>
+  <div id="composer">
+    <div class="row">
+      <textarea id="input" placeholder="输入消息…（Ctrl+Enter 发送，Ctrl+Shift+Enter 立即插入）"></textarea>
+      <button id="send" class="primary">发送</button>
+      <button id="stop" class="danger" disabled>中止</button>
+    </div>
+    <div class="hint">
+      <kbd>Enter</kbd> 换行 · <kbd>Ctrl</kbd>+<kbd>Enter</kbd> 等待插入 · <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Enter</kbd> 立即插入
+    </div>
+  </div>
+</main>
+
+<aside id="side">
+  <div class="tabs">
+    <button data-tab="trace" class="active">轨迹</button>
+    <button data-tab="context">上下文</button>
+    <button data-tab="tools">工具</button>
+  </div>
+  <div class="tab-body" id="tab-trace">
+    <div class="kv"><span class="k">水位</span><span class="v" id="usage-text">—</span></div>
+    <div class="meter" id="usage-meter"><i></i></div>
+    <div id="trace-list"><div class="empty">暂无事件</div></div>
+  </div>
+  <div class="tab-body hidden" id="tab-context">
+    <div class="kv"><span class="k">消息数</span><span class="v" id="ctx-count">0</span></div>
+    <div class="kv"><span class="k">估算 token</span><span class="v" id="ctx-tokens">0</span></div>
+    <div style="margin:8px 0 12px"><button id="refresh-context" style="width:100%">刷新上下文</button></div>
+    <div id="ctx-list"><div class="empty">暂无消息</div></div>
+  </div>
+  <div class="tab-body hidden" id="tab-tools">
+    <div id="tool-list"><div class="empty">加载中…</div></div>
+  </div>
+</aside>
+
+<script>
+"use strict";
+
+const MAX_TRACE = 300;
+const state = {
+  sessions: [],
+  current: null,      // session id
+  source: null,       // EventSource
+  trace: [],
+  usage: { tokens: 0, capacity: 0, ratio: 0 },
+  models: [],
+};
+
+const $ = (id) => document.getElementById(id);
+const el = (tag, cls, text) => {
+  const n = document.createElement(tag);
+  if (cls) n.className = cls;
+  if (text !== undefined) n.textContent = text;
+  return n;
+};
+
+function escapeText(s) { return s == null ? "" : String(s); }
+
+function fmtTime(ts) {
+  const d = new Date(ts * 1000);
+  return d.toLocaleTimeString("zh-CN", { hour12: false });
+}
+
+async function api(path, options = {}) {
+  const res = await fetch(path, {
+    headers: { "Content-Type": "application/json" },
+    ...options,
+  });
+  if (!res.ok) {
+    let detail = res.statusText;
+    try { const j = await res.json(); detail = j.detail || detail; } catch {}
+    throw new Error(detail);
+  }
+  return res.json();
+}
+
+function banner(msg) {
+  const b = $("banner");
+  if (!msg) { b.style.display = "none"; b.textContent = ""; return; }
+  b.textContent = msg;
+  b.style.display = "block";
+  setTimeout(() => { b.style.display = "none"; }, 6000);
+}
+
+/* ---------------- 健康与模型 ---------------- */
+
+async function loadHealth() {
+  try {
+    const h = await api("/api/health");
+    $("health-dot").className = "dot " + (h.ok ? "ok" : "err");
+    $("health-text").textContent = h.ok
+      ? `就绪 · ${h.sessions} 会话`
+      : `未就绪：${h.error || "未知原因"}`;
+    if (!h.ok) banner(`服务未就绪：${h.error}。请检查 .env 中的 DEEPSEEK_API_KEY`);
+    return h.ok;
+  } catch (e) {
+    $("health-dot").className = "dot err";
+    $("health-text").textContent = "无法连接";
+    return false;
+  }
+}
+
+async function loadModels() {
+  try {
+    const data = await api("/api/models");
+    state.models = data.models;
+    const sel = $("model-select");
+    sel.innerHTML = "";
+    for (const m of data.models) {
+      const o = el("option", null, m);
+      o.value = m;
+      if (m === data.default) o.selected = true;
+      sel.appendChild(o);
+    }
+  } catch (e) { /* 未就绪时忽略 */ }
+}
+
+/* ---------------- 会话列表 ---------------- */
+
+async function loadSessions() {
+  const data = await api("/api/sessions");
+  state.sessions = data.sessions;
+  renderSessions();
+}
+
+function renderSessions() {
+  const box = $("session-list");
+  $("sess-count").textContent = state.sessions.length;
+  if (!state.sessions.length) {
+    box.innerHTML = "";
+    box.appendChild(el("div", "empty", "暂无会话"));
+    return;
+  }
+  box.innerHTML = "";
+  for (const s of state.sessions) {
+    const row = el("div", "sess" + (s.session_id === state.current ? " active" : ""));
+    row.onclick = () => selectSession(s.session_id);
+
+    const id = el("span", "id", s.session_id);
+    const st = el("span", "st " + s.state, s.state);
+    const kill = el("button", "kill", "×");
+    kill.title = "删除会话";
+    kill.onclick = async (ev) => {
+      ev.stopPropagation();
+      await deleteSession(s.session_id);
+    };
+    row.append(id, st, kill);
+    box.appendChild(row);
+  }
+}
+
+async function createSession() {
+  banner("");
+  try {
+    const model = $("model-select").value || null;
+    const s = await api("/api/sessions", {
+      method: "POST",
+      body: JSON.stringify({ model }),
+    });
+    await loadSessions();
+    await selectSession(s.session_id);
+  } catch (e) { banner(`新建会话失败：${e.message}`); }
+}
+
+async function deleteSession(id) {
+  try {
+    await api(`/api/sessions/${id}`, { method: "DELETE" });
+    if (state.current === id) { state.current = null; closeStream(); resetChat(); }
+    await loadSessions();
+  } catch (e) { banner(`删除失败：${e.message}`); }
+}
+
+async function selectSession(id) {
+  if (state.current === id) return;
+  state.current = id;
+  state.trace = [];
+  state.usage = { tokens: 0, capacity: 0, ratio: 0 };
+  renderSessions();
+  resetChat();
+  renderTrace();
+  updateUsage();
+
+  try {
+    const data = await api(`/api/sessions/${id}/messages`);
+    state.usage.capacity = data.capacity;
+    renderMessages(data.messages || []);
+    updateUsage(data.tokens, data.capacity);
+  } catch (e) { banner(`加载历史失败：${e.message}`); }
+
+  openStream(id);
+}
+
+/* ---------------- 聊天区 ---------------- */
+
+function resetChat() {
+  const stream = $("stream");
+  stream.innerHTML = "";
+  stream.appendChild(el("div", "empty", "开始对话"));
+}
+
+function renderMessages(messages) {
+  const stream = $("stream");
+  stream.innerHTML = "";
+  // SystemMsg 不上屏（内容过长且非对话）
+  for (const m of messages) {
+    if (m.role === "system") continue;
+    if (m.role === "user") appendUser(m.content, m.ts);
+    else if (m.role === "assistant") {
+      for (const c of m.tool_calls || []) appendToolCall(c);
+      if (m.content) appendAssistant(m.content, true, [], m.ts);
+    } else if (m.role === "tool") appendToolResult(m.name, m.content, false);
+  }
+  scrollBottom();
+}
+
+function appendUser(text, ts) {
+  const wrap = el("div", "msg user");
+  const avatar = el("div", "avatar", "U");
+  const body = el("div", "body");
+  body.appendChild(el("div", "text", text));
+  body.appendChild(el("div", "meta", ts ? fmtTime(ts) : ""));
+  wrap.append(avatar, body);
+  $("stream").appendChild(wrap);
+  scrollBottom();
+}
+
+function appendAssistant(text, final, toolCalls, ts) {
+  if (!text && !toolCalls.length) return;
+  const wrap = el("div", "msg assistant");
+  const avatar = el("div", "avatar", "A");
+  const body = el("div", "body");
+  if (text) body.appendChild(el("div", "text", text));
+  const meta = el("div", "meta", final ? "final" : "reasoning");
+  if (ts) meta.textContent = `${final ? "final" : "reasoning"} · ${fmtTime(ts)}`;
+  body.appendChild(meta);
+  wrap.append(avatar, body);
+  $("stream").appendChild(wrap);
+  scrollBottom();
+}
+
+function appendToolCall(call) {
+  const card = el("div", "tool-card");
+  card.appendChild(el("div", "path", "→ " + call.name));
+  const pre = el("pre", null, call.arguments || "");
+  card.appendChild(pre);
+  $("stream").appendChild(card);
+  scrollBottom();
+}
+
+function appendToolResult(path, content, isErr) {
+  const card = el("div", "tool-card" + (isErr ? " err" : ""));
+  card.appendChild(el("div", "path" + (isErr ? " err" : ""), (isErr ? "✕ " : "✓ ") + path));
+  card.appendChild(el("pre", null, (content || "").slice(0, 1200)));
+  $("stream").appendChild(card);
+  scrollBottom();
+}
+
+function showThinking() {
+  if ($("thinking")) return;
+  const box = el("div", "msg assistant");
+  const avatar = el("div", "avatar", "A");
+  const body = el("div", "body");
+  const t = el("div", "thinking");
+  t.id = "thinking";
+  t.append(el("span"), el("span"), el("span"));
+  body.appendChild(t);
+  box.append(avatar, body);
+  $("stream").appendChild(box);
+  scrollBottom();
+}
+
+function hideThinking() {
+  const t = $("thinking");
+  if (t) t.parentElement.parentElement.remove();
+}
+
+function scrollBottom() {
+  const s = $("stream");
+  s.scrollTop = s.scrollHeight;
+}
+
+/* ---------------- SSE ---------------- */
+
+function closeStream() {
+  if (state.source) { state.source.close(); state.source = null; }
+}
+
+function openStream(id) {
+  closeStream();
+  const src = new EventSource(`/api/sessions/${id}/events`);
+  state.source = src;
+
+  src.onopen = () => { $("health-dot").className = "dot ok"; };
+
+  src.onmessage = (ev) => {
+    let data;
+    try { data = JSON.parse(ev.data); } catch { return; }
+    handleEvent(data);
+  };
+
+  src.onerror = () => {
+    // 浏览器会自动重连；这里只更新指示器
+    $("health-dot").className = "dot";
+  };
+}
+
+function handleEvent(ev) {
+  const { kind, payload, ts } = ev;
+  pushTrace(kind, payload, ts);
+
+  switch (kind) {
+    case "assistant":
+      hideThinking();
+      if (payload.tool_calls && payload.tool_calls.length) {
+        for (const c of payload.tool_calls) appendToolCall(c);
+      }
+      if (payload.content) appendAssistant(payload.content, payload.final, payload.tool_calls || [], ts);
+      break;
+
+    case "tool":
+      hideThinking();
+      appendToolResult(payload.path, payload.preview, false);
+      break;
+
+    case "route":
+      break;
+
+    case "compress":
+      banner(`上下文已压缩（${payload.action}）`);
+      break;
+
+    case "inject":
+      // 主消息已在本地渲染（send 时），这里只处理服务端主动插入的插话
+      if (!payload.echo) appendUser(payload.text, ts);
+      break;
+
+    case "usage":
+      updateUsage(payload.tokens, payload.capacity);
+      break;
+
+    case "state":
+      updateSendState(payload.state);
+      loadSessions().catch(() => {});
+      if (payload.state === "running") showThinking();
+      if (["done", "aborted", "error"].includes(payload.state)) hideThinking();
+      break;
+
+    case "error":
+      hideThinking();
+      banner(`推理错误：${payload.message}`);
+      break;
+  }
+}
+
+function updateSendState(stateName) {
+  const running = stateName === "running";
+  $("send").disabled = running;
+  $("stop").disabled = !running;
+}
+
+/* ---------------- 轨迹 ---------------- */
+
+function pushTrace(kind, payload, ts) {
+  state.trace.push({ kind, payload, ts: ts || Date.now() / 1000 });
+  if (state.trace.length > MAX_TRACE) state.trace.shift();
+  renderTrace();
+}
+
+function renderTrace() {
+  const box = $("trace-list");
+  if (!state.trace.length) {
+    box.innerHTML = "";
+    box.appendChild(el("div", "empty", "暂无事件"));
+    return;
+  }
+  box.innerHTML = "";
+  for (const item of state.trace.slice().reverse()) {
+    const row = el("div", "trace-item");
+    const head = el("div", "h");
+    head.append(
+      el("span", "tag " + item.kind, item.kind),
+      el("span", "t", fmtTime(item.ts)),
+    );
+    row.appendChild(head);
+    row.appendChild(el("div", null, summarize(item)));
+    box.appendChild(row);
+  }
+}
+
+function summarize(item) {
+  const p = item.payload || {};
+  switch (item.kind) {
+    case "assistant":
+      return (p.content || p.text || "").slice(0, 90) || `tool_calls × ${(p.tool_calls || []).length}`;
+    case "tool":
+      return `${p.path} · ${(p.preview || "").slice(0, 60)}`;
+    case "route":
+      return p.branch ? `→ ${p.branch} (${p.confidence})` : `回退全量 (${p.confidence})`;
+    case "compress":
+      return `${p.action} · 剩余 ${p.messages} 条`;
+    case "inject":
+      return `[${p.channel}] ${(p.text || "").slice(0, 60)}`;
+    case "usage":
+      return `${p.tokens} / ${p.capacity} tokens`;
+    case "state":
+      return `${p.state}${p.detail ? " · " + p.detail : ""}`;
+    case "error":
+      return p.message || "";
+    default:
+      return JSON.stringify(p).slice(0, 80);
+  }
+}
+
+/* ---------------- 用量 ---------------- */
+
+function updateUsage(tokens, capacity) {
+  if (tokens !== undefined) state.usage.tokens = tokens;
+  if (capacity !== undefined) state.usage.capacity = capacity;
+  const { tokens: t, capacity: c } = state.usage;
+  const ratio = c ? Math.min(1, t / c) : 0;
+  state.usage.ratio = ratio;
+
+  $("usage-text").textContent = c ? `${t} / ${c} (${(ratio * 100).toFixed(1)}%)` : "—";
+  const meter = $("usage-meter");
+  meter.className = "meter" + (ratio >= 0.85 ? " err" : ratio >= 0.75 ? " warn" : "");
+  meter.firstElementChild.style.width = `${(ratio * 100).toFixed(1)}%`;
+}
+
+/* ---------------- 上下文 ---------------- */
+
+async function refreshContext() {
+  if (!state.current) return;
+  try {
+    const data = await api(`/api/sessions/${state.current}/messages`);
+    $("ctx-count").textContent = (data.messages || []).length;
+    $("ctx-tokens").textContent = data.tokens || 0;
+    updateUsage(data.tokens, data.capacity);
+
+    const box = $("ctx-list");
+    box.innerHTML = "";
+    if (!data.messages || !data.messages.length) {
+      box.appendChild(el("div", "empty", "暂无消息"));
+      return;
+    }
+    for (const m of data.messages) {
+      const item = el("div", "ctx-item");
+      item.appendChild(el("div", "role", m.role + (m.name ? " · " + m.name : "")));
+      item.appendChild(el("div", "c", m.content || (m.tool_calls ? `[${m.tool_calls.length} tool_calls]` : "")));
+      box.appendChild(item);
+    }
+  } catch (e) { banner(`刷新上下文失败：${e.message}`); }
+}
+
+/* ---------------- 工具面板 ---------------- */
+
+async function loadTools() {
+  const box = $("tool-list");
+  try {
+    const data = await api("/api/tools");
+    box.innerHTML = "";
+    if (!data.tools.length) { box.appendChild(el("div", "empty", "无已注册工具")); return; }
+    for (const t of data.tools) {
+      const item = el("div", "ctx-item");
+      item.appendChild(el("div", "role", t.path));
+      item.appendChild(el("div", "c", `${t.description} · ${t.concurrency}${t.idempotent ? " · 幂等" : ""}`));
+      box.appendChild(item);
+    }
+  } catch (e) {
+    box.innerHTML = "";
+    box.appendChild(el("div", "empty", "加载失败：" + e.message));
+  }
+}
+
+/* ---------------- 发送 ---------------- */
+
+async function send(channel) {
+  if (!state.current) { banner("请先新建或选择会话"); return; }
+  const input = $("input");
+  const text = input.value.trim();
+  if (!text) return;
+
+  input.value = "";
+  banner("");
+  if (channel === "chat") appendUser(text);
+
+  try {
+    await api(`/api/sessions/${state.current}/messages`, {
+      method: "POST",
+      body: JSON.stringify({ text, channel }),
+    });
+    if (channel === "chat") { showThinking(); updateSendState("running"); }
+  } catch (e) {
+    banner(`发送失败：${e.message}`);
+    updateSendState("idle");
+  }
+}
+
+async function cancel() {
+  if (!state.current) return;
+  try {
+    await api(`/api/sessions/${state.current}/cancel`, { method: "POST" });
+    banner("已请求中止，将在下一个安全点生效");
+  } catch (e) { banner(`中止失败：${e.message}`); }
+}
+
+/* ---------------- 事件绑定 ---------------- */
+
+$("new-session").onclick = createSession;
+$("send").onclick = () => send("chat");
+$("stop").onclick = cancel;
+$("refresh-context").onclick = refreshContext;
+
+$("input").addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+    e.preventDefault();
+    send(e.shiftKey ? "control" : "chat");
+  }
+});
+
+for (const btn of document.querySelectorAll(".tabs button")) {
+  btn.onclick = () => {
+    for (const b of document.querySelectorAll(".tabs button")) b.classList.remove("active");
+    btn.classList.add("active");
+    for (const id of ["trace", "context", "tools"]) $("tab-" + id).classList.add("hidden");
+    $("tab-" + btn.dataset.tab).classList.remove("hidden");
+    if (btn.dataset.tab === "context") refreshContext();
+    if (btn.dataset.tab === "tools") loadTools();
+  };
+}
+
+/* ---------------- 启动 ---------------- */
+
+(async function boot() {
+  const ok = await loadHealth();
+  if (ok) { await loadModels(); await loadSessions(); await loadTools(); }
+  setInterval(loadHealth, 15000);
+})();
+</script>
+</body>
+</html>

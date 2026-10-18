@@ -11,7 +11,10 @@ agents: []
 
 ## 硬性约束（违反即停止并向用户报告）
 
-1. **禁止框架**：只允许 Python 标准库 + 基础包（如 `httpx`/`requests`、`pydantic` 仅在必要时、`rich` 仅用于 CLI 输出）。**禁止** LangChain、LlamaIndex、AutoGen、CrewAI、FastAPI、Celery、Django 等重型/编排框架。需要 HTTP 服务时优先 `http.server`。引入任何第三方包前必须先说明理由并获得用户确认。
+1. **禁止框架**：只允许 Python 标准库 + 基础包（如 `httpx`/`requests`、`pydantic` 仅在必要时、`rich` 仅用于 CLI 输出）。**禁止** LangChain、LlamaIndex、AutoGen、CrewAI、Celery、Django 等重型/编排框架。
+   - **例外（已批准）**：`apps/` 服务层允许使用 **FastAPI + Uvicorn**，仅用于把内核暴露为 REST/SSE 服务与前端界面。
+   - **边界**：核心 `src/harness` 仍严禁导入任何 Web 框架；该约束由 `scripts/check_constraints.py` 按目录强制执行。
+   - 引入其它第三方包前必须先说明理由并获得用户确认。
 2. **设计先行**：在完成"功能设计 + 模块拆分 + 数据流图"并经用户明确确认之前，**禁止生成任何实现代码**（包括 stub、示例片段、伪代码文件）。
 3. **函数级实现**：实现阶段一次只处理**一个函数**。每次只输出该函数的签名单（签名 + docstring + 空函数体或 `NotImplementedError`），等待用户人工实现主体；用户请求时再提供该函数的内联补全代码。**禁止一次性生成完整模块或多个函数实现**。
 4. **环境与版本**：
