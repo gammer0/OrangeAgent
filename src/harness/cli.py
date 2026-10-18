@@ -140,7 +140,7 @@ def _env_template(dest: Path) -> None:
 
 
 _BUILTIN_ENV_TEMPLATE = """\
-# Harness 配置模板 —— 复制为 .env 后填入真实值
+# Harness configuration template -- copy to .env and fill in real values
 DEEPSEEK_API_KEY=sk-your-key-here
 DEEPSEEK_BASE_URL=https://api.deepseek.com
 DEEPSEEK_MODEL=deepseek-chat

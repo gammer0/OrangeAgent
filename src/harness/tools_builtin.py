@@ -315,7 +315,7 @@ def shell_run(workdir: str, command: str, timeout: int = DEFAULT_TIMEOUT_S) -> s
 
 
 def py_check(workdir: str, path: str) -> str:
-    """语法检查：编译单个 .py 文件，返回是否通过。"""
+    """Syntax check: compile a single .py file and report whether it passes."""
     target = _resolve(workdir, path)
     if not target.is_file():
         raise FileNotFoundError(f"文件不存在: {path}")
@@ -328,7 +328,7 @@ def py_check(workdir: str, path: str) -> str:
 
 
 def py_run_brief(workdir: str, path: str, timeout: int = DEFAULT_TIMEOUT_S) -> str:
-    """短时运行脚本并回收输出（用于无交互的自检脚本）。"""
+    """Run a script briefly and collect its output (for non-interactive self-check scripts)."""
     target = _resolve(workdir, path)
     if not target.is_file():
         raise FileNotFoundError(f"文件不存在: {path}")
@@ -628,7 +628,7 @@ TOOL_SPECS: dict[str, dict[str, Any]] = {
               {"path": _STR}, ["path"], ["read"], True),
         _spec("/mcp/fs/write", mcp_fs_write, "MCP filesystem：写入文本文件",
               {"path": _STR, "content": _STR}, ["path", "content"], ["write"]),
-        # ---- 网络访问（caps=net，与文件/执行能力互不重叠）----
+        # ---- network access (caps=net; disjoint from file/exec capabilities) ----
         _spec("/tool/net/http/get", net_get, "HTTP GET，返回状态/类型/正文（截断）",
               {"url": _STR, "timeout": {"type": "integer", "default": HTTP_TIMEOUT_S}},
               ["url"], ["net"], True, "global"),
@@ -640,7 +640,7 @@ TOOL_SPECS: dict[str, dict[str, Any]] = {
         _spec("/tool/net/http/head", net_head, "HTTP HEAD，只取状态与响应头",
               {"url": _STR, "timeout": {"type": "integer", "default": HTTP_TIMEOUT_S}},
               ["url"], ["net"], True, "global"),
-        # ---- 工作记忆（路径固定，不开放任意写入）----
+        # ---- working memory (fixed path; no arbitrary writes) ----
         _spec("/tool/memory/work/read", memory_work_read, "读取工作记忆 .agent/WORK.md",
               {"offset": {"type": "integer", "default": 0},
                "limit": {"type": "integer", "default": 400}},

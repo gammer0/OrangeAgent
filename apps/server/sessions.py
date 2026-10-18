@@ -161,7 +161,7 @@ class DemoToolRegistry:
             ),
         ]
 
-    # ---- 工具实现（全部限定在工作目录内）----
+    # ---- tool implementations (all confined to the working directory) ----
 
     def _resolve(self, raw: str) -> str:
         from pathlib import Path
@@ -201,14 +201,14 @@ class DemoToolRegistry:
     def _echo(self, text: str) -> str:
         return text
 
-    # ---- 给 AgentLoop 用的解析器 ----
+    # ---- resolver used by AgentLoop ----
 
     def resolve(self, call: ToolCall) -> Any:
-        """把 ToolCall 解析为可执行定义。"""
+        """Resolve a ToolCall into an executable definition."""
         return self.store.by_path(call.name)
 
     def tool_specs(self) -> list[dict[str, Any]]:
-        """导出 OpenAI tools 声明，供模型请求使用。"""
+        """Export OpenAI tool declarations for model requests."""
         specs: list[dict[str, Any]] = []
         for entry in self.store.active_paths().values():
             specs.append(
