@@ -1,18 +1,19 @@
-"""C2 TokenEstimator + 水位判定（Watermark / JudgeResult）。
+"""C2 TokenEstimator + watermark decision (Watermark / JudgeResult).
 
-对应文档：
+See:
 
-* docs/02-数据结构设计/08-运行时状态.md（Watermark / JudgeResult）
-* docs/01-系统架构设计.md §4.3（水位定义）、§6 I5
+* docs/02-data-structures/08-runtime-state.md (Watermark / JudgeResult)
+* docs/01-architecture.md §4.3 (watermark definitions), §6 I5
 
-水位定义::
+Watermark definitions::
 
-    AUTO_1      = 0.50 × CAPACITY
-    AUTO_2      = 0.75 × CAPACITY
-    SESSION_END = 0.85 × CAPACITY   # 不压缩，收尾并提示开新会话
+    AUTO_1      = 0.50 x CAPACITY
+    AUTO_2      = 0.75 x CAPACITY
+    SESSION_END = 0.85 x CAPACITY   # no compression; wrap up and suggest a new session
 
-判定顺序（硬约束 I5）：先看 ``SESSION_END``（≥0.85 直接收尾、不压缩），
-再看 ``AUTO_2``（≥0.75），最后看 ``AUTO_1``（≥0.50）。每个水位只触发一次。
+Decision order (hard constraint I5): check ``SESSION_END`` first (>=0.85 wraps
+up without compressing), then ``AUTO_2`` (>=0.75), then ``AUTO_1`` (>=0.50).
+Each watermark fires at most once.
 """
 
 from __future__ import annotations
@@ -36,32 +37,33 @@ __all__ = [
     "judge",
 ]
 
-#: 一级自动压缩水位（首次跨越 50% 触发）。
+#: Level-1 auto-compression watermark (fires on first crossing 50%).
 AUTO_1 = 0.50
-#: 二级自动压缩水位（首次跨越 75% 触发）。
+#: Level-2 auto-compression watermark (fires on first crossing 75%).
 AUTO_2 = 0.75
-#: 会话收尾水位（≥85% 只收尾，不压缩）。
+#: Session wrap-up watermark (>=85% wraps up without compressing).
 SESSION_END = 0.85
 
-#: 每字符对应的 token 粗估系数（不引入 tokenizer，见文档 §1.2 非目标）。
+#: Rough tokens-per-character coefficient (no tokenizer; see doc §1.2 non-goals).
 CHARS_PER_TOKEN = 2.0
 
 JudgeAction = Literal["normal", "compress_1", "compress_2", "session_end"]
 
-#: 水位 → 该水位触发时写入 ``compressed_at`` 的键（百分比整数）。
+#: Watermark -> key written into ``compressed_at`` when it fires (integer percent).
 _WATERMARK_KEY: dict[str, int] = {"compress_1": 50, "compress_2": 75}
 
 
 def estimate_tokens(content: str) -> int:
-    """按 ``chars / 2.0`` 粗估 token 数（向上取整，保证非空文本至少 1）。"""
+    """Estimate token count as ``chars / 2.0`` (round up, min 1 for non-empty text)."""
     return int(len(content) / CHARS_PER_TOKEN + 0.999_999_999)
 
 
 def estimate_message_tokens(message: Message) -> int:
-    """估算单条消息的 token 数。
+    """Estimate the token count of a single message.
 
-    除 ``content`` 外，``ToolCall`` 的 ``name`` 与 ``arguments`` 也会进入 provider
-    请求体，因此一并计入，避免工具调用密集的历史被低估。
+    Besides ``content``, a ``ToolCall``'s ``name`` and ``arguments`` also travel
+    in the provider request body, so they are counted too; otherwise
+    tool-call-heavy history would be underestimated.
     """
     if isinstance(message, (SystemMsg, UserMsg, ToolMsg)):
         return estimate_tokens(message.content)
@@ -72,22 +74,22 @@ def estimate_message_tokens(message: Message) -> int:
             total += estimate_tokens(call.name) + estimate_tokens(call.arguments)
         return total
 
-    raise TypeError(f"未知消息类型: {type(message).__name__}")  # pragma: no cover
+    raise TypeError(f"unknown message type: {type(message).__name__}")  # pragma: no cover
 
 
 def estimate_messages_tokens(messages: list[Message]) -> int:
-    """估算整段历史的 token 数。"""
+    """Estimate the token count of a whole history."""
     return sum(estimate_message_tokens(m) for m in messages)
 
 
 class Watermark(BaseModel):
-    """上下文水位记录（F 组）。
+    """Context watermark record (group F).
 
     Attributes:
-        capacity: 模型上下文上限（token）。
-        compressed_at: 已触发压缩的水位（``50`` / ``75``）。**F1：只增不减，
-            同一水位不重复加入。**
-        last_estimate: 最近一次估算的 token 数。
+        capacity: Model context limit (tokens).
+        compressed_at: Watermarks already compressed (``50`` / ``75``).
+            **F1: grow-only; the same watermark is never added twice.**
+        last_estimate: Most recent token estimate.
     """
 
     model_config = ConfigDict(validate_assignment=False)
@@ -97,16 +99,16 @@ class Watermark(BaseModel):
     last_estimate: int = Field(default=0, ge=0)
 
     def is_compressed(self, level: int) -> bool:
-        """该水位是否已触发过压缩。"""
+        """Whether compression has already fired for this watermark."""
         return level in self.compressed_at
 
     def mark_compressed(self, level: int) -> bool:
-        """记录某水位已压缩。
+        """Record that a watermark has been compressed.
 
-        F1：集合只增不减；同一水位重复标记不产生变化。
+        F1: the set only grows; re-marking the same watermark is a no-op.
 
         Returns:
-            ``True`` 表示本次是新加入，``False`` 表示该水位此前已标记。
+            ``True`` if newly added, ``False`` if already marked.
         """
         if level in self.compressed_at:
             return False
@@ -114,26 +116,26 @@ class Watermark(BaseModel):
         return True
 
     def update_estimate(self, estimate: int) -> float:
-        """写入最近估算值并返回占用比例。"""
+        """Store the latest estimate and return the occupancy ratio."""
         self.last_estimate = max(0, estimate)
         return self.ratio
 
     @property
     def ratio(self) -> float:
-        """最近估算占容量的比例。"""
+        """Occupancy ratio of the latest estimate relative to capacity."""
         return self.last_estimate / self.capacity
 
     def as_set(self) -> frozenset[int]:
-        """只读快照，供需要对外暴露时使用（防止外部回写降低集合）。"""
+        """Read-only snapshot for external exposure (prevents callers shrinking it)."""
         return frozenset(self.compressed_at)
 
 
 class JudgeResult(BaseModel):
-    """水位判定结果。
+    """Watermark decision result.
 
     Attributes:
-        action: ``normal`` / ``compress_1`` / ``compress_2`` / ``session_end``。
-        ratio: 估算占用比例（``estimate / capacity``）。
+        action: ``normal`` / ``compress_1`` / ``compress_2`` / ``session_end``.
+        ratio: Estimated occupancy (``estimate / capacity``).
     """
 
     model_config = ConfigDict(frozen=True)
@@ -143,7 +145,7 @@ class JudgeResult(BaseModel):
 
     @property
     def level(self) -> int | None:
-        """本结果对应的压缩水位（``50`` / ``75``）；无需压缩时为 ``None``。"""
+        """Compression watermark for this result (``50`` / ``75``); ``None`` if not needed."""
         return _WATERMARK_KEY.get(self.action)
 
 
@@ -154,25 +156,26 @@ def judge(
     watermark: Watermark | None = None,
     estimate: int | None = None,
 ) -> JudgeResult:
-    """判定当前上下文水位。
+    """Decide the current context watermark.
 
     Args:
-        messages: 当前会话消息列表。
-        capacity: 模型上下文上限。
-        watermark: 水位记录；传入时会就地更新 ``last_estimate``。
-            **不负责记账**：``compressed_at`` 由 ``compressor.compress()``
-            在压缩真正发生后写入，保证"判定"与"执行"解耦。
-            不传则视为无状态判定（每个水位都会触发）。
-        estimate: 已算好的 token 估算值；省略时按 ``messages`` 现算。
+        messages: Current session message list.
+        capacity: Model context limit.
+        watermark: Watermark record; when given, ``last_estimate`` is updated
+            in place. It **does not** record compression: ``compressed_at`` is
+            written by ``compressor.compress()`` once compression actually
+            happens, keeping "decide" and "execute" decoupled. Omit it for a
+            stateless decision (every watermark fires).
+        estimate: Precomputed token estimate; computed from ``messages`` if omitted.
 
     Returns:
-        ``JudgeResult``；``ratio`` 恒为 ``estimate / capacity``。
+        ``JudgeResult``; ``ratio`` is always ``estimate / capacity``.
 
     Raises:
-        ValueError: ``capacity`` 非正数。
+        ValueError: ``capacity`` is not positive.
     """
     if capacity <= 0:
-        raise ValueError(f"capacity 必须为正数，实际为 {capacity}")
+        raise ValueError(f"capacity must be positive, got {capacity}")
 
     if estimate is None:
         estimate = estimate_messages_tokens(messages)
@@ -181,17 +184,20 @@ def judge(
         watermark.update_estimate(estimate) if watermark is not None else estimate / capacity
     )
 
-    # ponytail: 这里**只判定不记账**。记账交给真正执行压缩的 compress()——
-    # 否则 compress() 的 I5 重复触发检查会立刻失败，压缩永远不生效。
+    # Note: this function **only decides, never records**. Recording belongs to
+    # compress(), which does the real work -- otherwise compress() would
+    # immediately fail its own I5 duplicate-trigger check and never run.
     return _decide(ratio, watermark)
 
 
 def _decide(ratio: float, watermark: Watermark | None) -> JudgeResult:
-    """按 I5 顺序判定：0.75 → 0.50 → session_end。
+    """Decide in I5 order: 0.75 -> 0.50 -> session_end.
 
-    ponytail: 收尾判定必须放在**最后**。若放在最前，单步从 <50% 直接
-    冲过 85% 时会一口气吃掉两个压缩机会，压缩永远不触发。
-    有水位的未压缩记录时，先给压缩机会；压完自然回落，再由下一轮判收尾。
+    Note: the wrap-up check must come **last**. If it came first, a single step
+    jumping from <50% straight past 85% would swallow both compression
+    opportunities at once and compression would never fire. When an
+    un-compressed watermark is still available, give compression a chance
+    first; the ratio drops afterwards and the next round decides wrap-up.
     """
     if ratio >= AUTO_2 and not _already(watermark, AUTO_2):
         return JudgeResult(action="compress_2", ratio=ratio)
@@ -200,14 +206,14 @@ def _decide(ratio: float, watermark: Watermark | None) -> JudgeResult:
         return JudgeResult(action="compress_1", ratio=ratio)
 
     if ratio >= SESSION_END:
-        # ≥85% 且已无可用压缩水位 → 收尾，不压缩
+        # >=85% with no compression watermark left -> wrap up without compressing
         return JudgeResult(action="session_end", ratio=ratio)
 
     return JudgeResult(action="normal", ratio=ratio)
 
 
 def _already(watermark: Watermark | None, threshold: float) -> bool:
-    """该阈值对应的水位是否已触发过（无 watermark 时永不为真）。"""
+    """Whether this threshold has already fired (always False without a watermark)."""
     if watermark is None:
         return False
     return watermark.is_compressed(int(round(threshold * 100)))
