@@ -23,6 +23,10 @@ OPPOSITE: dict[str, str] = {
     "right": "left",
 }
 
+# 待执行方向队列容量。2 足够做「一帧内连按两次」的连续折返，
+# 又不至于让手速快的玩家把方向堆到失控。
+DIRECTION_QUEUE_SIZE = 2
+
 
 class SnakeGame:
     """一局贪吃蛇的全部状态与规则。
@@ -58,7 +62,7 @@ class SnakeGame:
             (mid_x - i, mid_y) for i in range(config.INITIAL_LENGTH)
         ]
         self._direction = "right"
-        self._pending = "right"
+        self._direction_queue: list[str] = []  # 队首是下一帧要转的方向
         self._score = 0
         self._over = False
         self._won = False
@@ -103,22 +107,35 @@ class SnakeGame:
 
     # ------------------------------------------------------------------ 规则
     def move(self, direction: str) -> None:
-        """预置下一步方向。非法值抛 ValueError，反向输入静默忽略。"""
+        """把方向放入待执行队列。
+
+        非法值抛 ValueError。以下情况静默忽略（不报错、不入队）：
+        与「队列最后一个方向（空则当前方向）」相同、与它相反、
+        或队列已满（DIRECTION_QUEUE_SIZE）。
+        """
         if direction not in DIRECTIONS:
             raise ValueError(f"未知方向: {direction!r}")
         if self._over:
             return
-        # 只有长度 > 1 时「禁止反向」才有意义（单节蛇没有方向可反）
-        if len(self._snake) > 1 and direction == OPPOSITE[self._direction]:
+        # 以队列尾为基准，而不是当前方向：这样「上、左」连按两次都能保留
+        last = self._direction_queue[-1] if self._direction_queue else self._direction
+        if direction == last:
             return
-        self._pending = direction
+        # 只有长度 > 1 时「禁止反向」才有意义（单节蛇没有方向可反）
+        if len(self._snake) > 1 and direction == OPPOSITE[last]:
+            return
+        if len(self._direction_queue) >= DIRECTION_QUEUE_SIZE:
+            return
+        self._direction_queue.append(direction)
 
     def step(self) -> None:
         """前进一步：位移、判定吃食物 / 撞墙 / 撞自身。结束后不再改变状态。"""
         if self._over:
             return
 
-        self._direction = self._pending
+        # 每步只消费队首一个方向；队列空则维持当前方向
+        if self._direction_queue:
+            self._direction = self._direction_queue.pop(0)
         dx, dy = DIRECTIONS[self._direction]
         head_x, head_y = self._snake[0]
         new_head = (head_x + dx, head_y + dy)
