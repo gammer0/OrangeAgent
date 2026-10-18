@@ -1,33 +1,41 @@
-"""C3 GlobalCompressor：按 CallRecord 边界折叠历史。
+"""C3 GlobalCompressor: fold history along CallRecord boundaries.
 
-对应文档：docs/01-系统架构设计.md §4.3（C3 状态机与三条硬约束）
+See docs/01-architecture.md §4.3 (C3 state machine and three hard constraints).
 
-三条硬约束：
+The three hard constraints:
 
-1. **边界只落在 CallRecord 之间**——压缩切口不得劈开一个 AssistantMsg 及其
-   后续 ToolMsg 序列，否则 A2/A3 立刻失效。
-2. **保留段以完整 CallRecord 起始**——切口之后的第一条消息必须是一个
-   ``AssistantMsg``（可能是 CallRecord 头，也可能是最终答案），不能是孤立的
-   ``ToolMsg`` 或 ``UserMsg`` 夹在调用序列中。
-3. **每个水位只触发一次**——由 ``Watermark`` 记账（I5）；本模块只提供
-   ``compress``，调用方传 ``level`` 前应先经 ``watermark.judge`` 判定。
+1. **The boundary only falls between CallRecords** -- a compression cut must
+   never split an AssistantMsg from the ToolMsg sequence that follows it,
+   otherwise A2/A3 break immediately.
+2. **The kept segment starts at a complete CallRecord** -- the first message
+   after the cut must be an ``AssistantMsg`` (either a CallRecord head or the
+   final answer), never an isolated ``ToolMsg`` or a ``UserMsg`` wedged into a
+   call sequence.
+3. **Each watermark fires once** -- tracked by ``Watermark`` (I5); this module
+   only provides ``compress``, and callers must run ``watermark.judge`` before
+   passing ``level``.
 
-摘要注入位置的决策（**必须与 A1 一致**）：
+Decision on where the summary is injected (**must stay consistent with A1**):
 
-    摘要作为 ``messages[0]``（``SystemMsg``）之后、**保留段之前**的一条
-    ``UserMsg``，内容带固定前缀 ``[上下文摘要]``。
+    The summary is a ``UserMsg`` placed after ``messages[0]`` (the ``SystemMsg``)
+    and **before the kept segment**, with the fixed prefix
+    ``[上下文摘要]``.
 
-    理由：
+    Rationale:
 
-    * A1 要求 ``messages[0]`` 是 ``SystemMsg`` **且唯一**，因此不能新增
-      ``SystemMsg`` 承载摘要；
-    * 摘要描述的是"更早的对话历史"，语义上属于用户侧对会话的输入，
-      而非系统要求；放在 ``UserMsg`` 中不会污染系统提示词前缀（I1）；
-    * ``ToolMsg`` 必须绑定 ``ToolCall.id``（A2），天然不能承载摘要；
-    * 该 ``UserMsg`` 内容非空，满足 A9；且位于保留段起始的完整
-      ``CallRecord`` 之前，不插入任何未闭合的 ``tool_calls`` 序列内部（I6）。
+    * A1 requires ``messages[0]`` to be the ``SystemMsg`` **and the only one**,
+      so a new ``SystemMsg`` cannot carry the summary;
+    * The summary describes "earlier conversation history" and is semantically
+      user-side input to the session rather than a system requirement; keeping
+      it in a ``UserMsg`` avoids polluting the system-prompt prefix (I1);
+    * ``ToolMsg`` must bind to a ``ToolCall.id`` (A2) and therefore cannot carry
+      a summary;
+    * The ``UserMsg`` content is non-empty, satisfying A9, and it sits before
+      the complete ``CallRecord`` that starts the kept segment, never inserted
+      inside an unclosed ``tool_calls`` sequence (I6).
 
-    若此前已存在摘要（二次压缩），旧摘要会被合并进新摘要文本，不会累积。
+    If a summary already exists (second compression), the old summary is merged
+    into the new summary text instead of accumulating.
 """
 
 from __future__ import annotations
@@ -55,47 +63,51 @@ __all__ = [
     "compress",
 ]
 
-#: 摘要消息的固定前缀，便于识别与合并历史摘要。
+#: Fixed prefix of the summary message; makes historical summaries identifiable
+#: and mergeable.
+#: Note: this is model-visible text, so it intentionally stays in Chinese.
 SUMMARY_PREFIX = "[上下文摘要]"
 
-#: ``summarizer`` 的签名：``(text) -> summary``。
+#: ``summarizer`` signature: ``(text) -> summary``.
 Summarizer = Callable[[str], str]
 
-#: 未配对尾部：结构上不完整的消息（正常情况下应为空）。
+#: Unpaired tail: structurally incomplete messages (normally empty).
 Tail = list[Message]
 
 
 @dataclass(frozen=True, slots=True)
 class CallRecord:
-    """一个最小不可分单位。
+    """The smallest indivisible unit.
 
     Attributes:
-        messages: 该记录包含的全部消息，按原序。
-        call_ids: 该记录内 ``AssistantMsg.tool_calls`` 的 id，按原序。
+        messages: Every message in this record, in original order.
+        call_ids: Ids of ``AssistantMsg.tool_calls`` in this record, in original
+            order.
     """
 
     messages: tuple[Message, ...]
 
     @property
     def call_ids(self) -> tuple[str, ...]:
-        """记录内全部 tool_call id。"""
+        """Every tool_call id in the record."""
         return tuple(call.id for m in self.messages for call in _calls_of(m))
 
     def text(self) -> str:
-        """把记录渲染成可喂给摘要器的纯文本。"""
+        """Render the record as plain text suitable for the summarizer."""
         return render_segment(self.messages)
 
 
 @dataclass(frozen=True, slots=True)
 class SplitResult:
-    """``split_call_records`` 的结果。
+    """Result of ``split_call_records``.
 
     Attributes:
-        system: ``messages[0]`` 的 SystemMsg（A1 保证存在）。
-        head: ``system`` 之后、第一个 ``AssistantMsg`` 之前的消息
-            （``UserMsg`` / 历史摘要等），可整体归入被压缩段。
-        records: 完好的 CallRecord 序列。
-        tail: 未配对尾部（末尾没有对应 ``ToolMsg`` 的调用，或悬挂的 ToolMsg）。
+        system: The ``messages[0]`` SystemMsg (guaranteed by A1).
+        head: Messages after ``system`` and before the first ``AssistantMsg``
+            (``UserMsg``, historical summaries, ...); all can be compressed.
+        records: The intact CallRecord sequence.
+        tail: Unpaired tail (trailing calls without a matching ``ToolMsg``, or
+            dangling ToolMsgs).
     """
 
     system: SystemMsg
@@ -105,7 +117,7 @@ class SplitResult:
 
     @property
     def records_messages(self) -> list[Message]:
-        """把全部记录摊平成消息列表。"""
+        """Flatten every record into a message list."""
         return [m for record in self.records for m in record.messages]
 
 
@@ -116,22 +128,23 @@ def _calls_of(message: Message) -> list[ToolCall]:
 
 
 def split_call_records(messages: Sequence[Message]) -> SplitResult:
-    """把一个合法消息序列切成 ``SystemMsg + head + CallRecord* + tail``。
+    """Split a valid message sequence into ``SystemMsg + head + CallRecord* + tail``.
 
     Args:
-        messages: 满足 A1/A2/A3 的消息序列（``SystemMsg`` 必须在首位）。
+        messages: A message sequence satisfying A1/A2/A3 (``SystemMsg`` first).
 
     Returns:
-        ``SplitResult``。
+        ``SplitResult``.
 
     Raises:
-        ValueError: ``messages`` 为空或首条不是 ``SystemMsg``（A1 前置条件）。
+        ValueError: ``messages`` is empty or does not start with ``SystemMsg``
+            (A1 precondition).
     """
     if not messages:
-        raise ValueError("A1: messages 不得为空")
+        raise ValueError("A1: messages must not be empty")
     first = messages[0]
     if not isinstance(first, SystemMsg):
-        raise ValueError(f"A1: messages[0] 必须是 SystemMsg，实际为 {type(first).__name__}")
+        raise ValueError(f"A1: messages[0] must be SystemMsg, got {type(first).__name__}")
     system = first
 
     rest = list(messages[1:])
@@ -143,9 +156,11 @@ def split_call_records(messages: Sequence[Message]) -> SplitResult:
     while index < len(rest):
         msg = rest[index]
         if isinstance(msg, (UserMsg, SystemMsg)):
-            # 位于两条 CallRecord 之间的用户消息（新任务/新追问）本身是可压缩的
-            # 前导文本，归入 head；它不会切开任何调用序列，因此不违反硬约束①。
-            # SystemMsg 在这里出现意味着 A1 已被破坏，交给 validate_messages 报错。
+            # A user message sitting between two CallRecords (new task or
+            # follow-up) is itself compressible leading text, so it goes into
+            # head; it never splits a call sequence, so hard constraint 1 holds.
+            # A SystemMsg here means A1 is already broken; leave it to
+            # validate_messages to report.
             head.append(msg)
             index += 1
             continue
@@ -165,7 +180,8 @@ def split_call_records(messages: Sequence[Message]) -> SplitResult:
                     if not expected:
                         break
                 if expected:
-                    # 未配对：整条记录连同其后全部消息归入尾部
+                    # Unpaired: fold the whole record and everything after it
+                    # into the tail.
                     tail.extend(record)
                     tail.extend(rest[index:])
                     index = len(rest)
@@ -173,7 +189,8 @@ def split_call_records(messages: Sequence[Message]) -> SplitResult:
             records.append(CallRecord(messages=tuple(record)))
             continue
 
-        # 悬挂的 ToolMsg（无匹配 ToolCall）：结构非法，归入尾部让校验器报 A2
+        # Dangling ToolMsg (no matching ToolCall): structurally invalid; keep it
+        # in the tail so the validator reports A2.
         tail.append(msg)
         index += 1
 
@@ -181,7 +198,7 @@ def split_call_records(messages: Sequence[Message]) -> SplitResult:
 
 
 def _render_message(message: Message) -> str:
-    """把单条消息渲染为摘要输入文本，工具路径用 ``ToolMsg.name`` 标注。"""
+    """Render one message into summarizer input text, tagging tool paths via ``ToolMsg.name``."""
     if isinstance(message, SystemMsg):
         return "[system]\n" + message.content
     if isinstance(message, UserMsg):
@@ -194,21 +211,22 @@ def _render_message(message: Message) -> str:
             lines.append(f"[assistant:call {call.name}] {call.arguments}")
         return "\n".join(lines)
     if isinstance(message, ToolMsg):
-        # C3 要求：摘要使用 ToolMsg.name 标注工具路径
+        # C3 requires the summary to tag the tool path with ToolMsg.name
         return f"[tool:{message.name}]\n{message.content}"
-    raise TypeError(f"未知消息类型: {type(message).__name__}")  # pragma: no cover
+    raise TypeError(f"unknown message type: {type(message).__name__}")  # pragma: no cover
 
 
 def render_segment(messages: Sequence[Message]) -> str:
-    """渲染一段消息供摘要器使用。"""
+    """Render a segment of messages for the summarizer."""
     return "\n\n".join(_render_message(m) for m in messages)
 
 
 def default_keep_records(capacity: int, level: int) -> int:
-    """按水位计算保留的完整 CallRecord 数量。
+    """Compute how many complete CallRecords to keep for a watermark.
 
-    50% 水位保留 4 个记录，75% 水位保留 2 个。水位越高说明历史越长，
-    允许折叠得更激进；该策略与文档"保留最近 K 条"一致。
+    Keep 4 records at the 50% watermark and 2 at 75%. A higher watermark means
+    longer history and allows more aggressive folding; this matches the design
+    doc's "keep the most recent K".
     """
     if level >= int(round(AUTO_2 * 100)):
         return 2
@@ -237,31 +255,37 @@ def compress(
     keep_records: int | None = None,
     watermark: Watermark | None = None,
 ) -> list[Message]:
-    """按 CallRecord 边界折叠历史，返回新的消息列表。
+    """Fold history along CallRecord boundaries and return a new message list.
 
     Args:
-        messages: 当前消息序列（需满足 A1/A2/A3）。
-        level: 压缩水位，``50`` 或 ``75``（与 ``Watermark.compressed_at`` 一致）。
-        summarizer: 依赖注入的摘要函数 ``(text) -> summary``；本模块不直接调模型。
-        keep_records: 保留的完整 CallRecord 数量；省略时按水位取默认值。
-        watermark: 传入时按 I5 校验"该水位只触发一次"并记账。
+        messages: Current message sequence (must satisfy A1/A2/A3).
+        level: Compression watermark, ``50`` or ``75`` (matching
+            ``Watermark.compressed_at``).
+        summarizer: Injected summarizer ``(text) -> summary``; this module never
+            calls the model directly.
+        keep_records: Number of complete CallRecords to keep; defaults derived
+            from the watermark when omitted.
+        watermark: When given, enforces I5 ("each watermark fires once") and
+            records the firing.
 
     Returns:
-        重建后的消息列表：``[SystemMsg, (UserMsg 摘要), *保留段, *tail]``，
-        已通过 ``validate_messages``（A1/A2/A3）。
+        The rebuilt list ``[SystemMsg, (UserMsg summary), *kept, *tail]``, already
+        validated by ``validate_messages`` (A1/A2/A3).
 
     Raises:
-        ValueError: 水位重复触发（I5），或输入序列本身非法。
+        ValueError: The watermark already fired (I5), or the input sequence is
+            itself invalid.
 
     Note:
-        压缩段为空（没有可折叠的记录）时，原样返回浅拷贝，且**不**记账，
-        避免"压缩了个寂寞"却占掉一次水位机会。
+        When the compressible segment is empty (nothing to fold) the input is
+        returned as a shallow copy and **no** watermark is recorded, so a no-op
+        compression does not consume a watermark opportunity.
     """
     if watermark is not None and watermark.is_compressed(level):
-        raise ValueError(f"I5: 水位 {level} 已触发过压缩，不得重复触发")
+        raise ValueError(f"I5: watermark {level} already compressed; cannot fire again")
 
     split = split_call_records(list(messages))
-    # 先校验输入，避免在非法输入上做摘要这种昂贵操作
+    # Validate the input first so we never run an expensive summary on bad input
     validate_messages(list(messages))
 
     keep = default_keep_records(watermark.capacity if watermark else 0, level)
@@ -272,14 +296,15 @@ def compress(
     if compressible <= 0:
         return list(messages)
 
-    # ① 边界只落在 CallRecord 之间：被压缩段 = head + records[:compressible]
+    # ① Boundaries fall only between CallRecords: compressed = head + records[:n]
     dropped_records = split.records[:compressible]
     kept_records = split.records[compressible:]
-    # ② 保留段以完整 CallRecord 起始：kept_records[0] 的首条消息必为 AssistantMsg
+    # ② The kept segment starts at a complete CallRecord, so kept_records[0]'s
+    # first message must be an AssistantMsg.
     if kept_records:
         first_kept = kept_records[0].messages[0]
-        if not isinstance(first_kept, AssistantMsg):  # pragma: no cover - split 已保证
-            raise ValueError("C3: 保留段必须以完整 CallRecord（AssistantMsg）起始")
+        if not isinstance(first_kept, AssistantMsg):  # pragma: no cover - split guarantees this
+            raise ValueError("C3: the kept segment must start with a complete CallRecord (AssistantMsg)")
 
     prior_index, prior_summary = _find_previous_summary(split.head)
     older = [m for i, m in enumerate(split.head) if i != prior_index]
@@ -288,8 +313,9 @@ def compress(
         return list(messages)
 
     if not kept_records and not split.tail:
-        # 只保留摘要会导致历史里没有任何"最近消息"；此时整体退回不压缩，
-        # 由上层（StepController）在 85% 时收尾。
+        # Keeping only the summary would leave no "recent message" in history at
+        # all; in that case skip compression and let the upper layer
+        # (StepController) wrap up at 85%.
         return list(messages)
 
     new_summary = summarizer(render_segment(to_summarize))
@@ -304,4 +330,3 @@ def compress(
         watermark.mark_compressed(level)
 
     return rebuilt
-
