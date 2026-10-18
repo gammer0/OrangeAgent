@@ -1,17 +1,21 @@
-"""Harness 服务管理 CLI。
+"""Harness service management CLI.
 
-三个子命令组：
+Three subcommand groups:
 
-* ``harness service`` —— 服务生命周期与状态（``status`` / ``doctor`` / ``sweep`` / ``tree``）
-* ``harness config``  —— 配置与超参数（``show`` / ``get`` / ``check`` / ``env``）
-* ``harness config init`` —— 生成配置模板
+* ``harness service`` -- service lifecycle and status (``status`` / ``doctor`` /
+  ``sweep`` / ``tree``)
+* ``harness config``  -- configuration and hyperparameters (``show`` / ``get`` /
+  ``check`` / ``env``)
+* ``harness config init`` -- generate a configuration template
 
-设计约定：
+Design conventions:
 
-* **只用标准库 ``argparse``**，不引入 click/typer 等额外依赖。
-* **默认输出人类可读**；``--json`` 输出机器可读，便于脚本与 CI 消费。
-* **不打印密钥**：任何路径都只输出 ``masked_key()``。
-* 退出码：``0`` 成功 / ``1`` 运行时问题（如状态 degraded）/ ``2`` 参数错误。
+* **Standard-library ``argparse`` only**; no click/typer or other extra dependency.
+* **Human-readable output by default**; ``--json`` emits machine-readable output
+  for scripts and CI.
+* **Never print secrets**: every path emits ``masked_key()`` only.
+* Exit codes: ``0`` success / ``1`` runtime problem (e.g. degraded state) / ``2``
+  argument error.
 """
 
 from __future__ import annotations
@@ -45,10 +49,10 @@ from harness.tools_builtin import TOOL_SPECS
 
 __all__ = ["main", "build_parser"]
 
-#: 生成模板的目标文件名。
+#: Target file name for the generated template.
 ENV_TEMPLATE_NAME = ".env.example"
 
-#: 模型类配置项（直接从 LLMConfig 读取，不进入 defaults）。
+#: Model-related configuration items (read straight from LLMConfig; not part of defaults).
 _MODEL_KEYS = (
     "base_url",
     "model",
@@ -60,17 +64,17 @@ _MODEL_KEYS = (
 
 
 # ---------------------------------------------------------------------------
-# 输出辅助
+# Output helpers
 # ---------------------------------------------------------------------------
 
 
 def _print_json(payload: Any) -> None:
-    """以 UTF-8 友好的 JSON 输出。"""
+    """Print JSON with UTF-8-friendly output."""
     print(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
 
 
 def _state_mark(state: str) -> str:
-    """把状态映射为终端标记。"""
+    """Map a state to a terminal marker."""
     return {
         "ready": "OK",
         "degraded": "WARN",
@@ -80,7 +84,7 @@ def _state_mark(state: str) -> str:
 
 
 def _print_status(status: ServiceStatus, *, as_json: bool) -> None:
-    """打印服务状态。"""
+    """Print the service status."""
     if as_json:
         _print_json(status.to_dict())
         return
@@ -99,7 +103,7 @@ def _print_status(status: ServiceStatus, *, as_json: bool) -> None:
 
 
 def _flatten_defaults() -> dict[str, Any]:
-    """把分组默认值摊平为 ``group.field`` → value。"""
+    """Flatten grouped defaults into ``group.field`` -> value."""
     flat: dict[str, Any] = {}
     for group, values in defaults_as_dict().items():
         for name, value in values.items():
@@ -108,10 +112,10 @@ def _flatten_defaults() -> dict[str, Any]:
 
 
 def _resolve_key(key: str, flat: dict[str, Any]) -> tuple[str, Any]:
-    """解析 ``group.field`` 或裸字段名。
+    """Resolve a ``group.field`` key or a bare field name.
 
     Raises:
-        KeyError: 键不存在或存在歧义（多个分组同名）。
+        KeyError: The key is missing or ambiguous (same field name in several groups).
     """
     if key in flat:
         return key, flat[key]
@@ -124,7 +128,10 @@ def _resolve_key(key: str, flat: dict[str, Any]) -> tuple[str, Any]:
 
 
 def _env_template(dest: Path) -> None:
-    """生成 ``.env.example``：优先复制仓库内模板，否则写入内置内容。"""
+    """Generate ``.env.example``.
+
+    Copies the repo template when present, otherwise writes the builtin one.
+    """
     bundled = Path(__file__).resolve().parents[2] / ENV_TEMPLATE_NAME
     if bundled.is_file() and bundled.resolve() != dest.resolve():
         shutil.copyfile(bundled, dest)
@@ -145,7 +152,7 @@ LLM_MAX_RETRIES=2
 
 
 # ---------------------------------------------------------------------------
-# service 子命令
+# service subcommands
 # ---------------------------------------------------------------------------
 
 
@@ -239,7 +246,7 @@ def _cmd_service_doctor(args: argparse.Namespace) -> int:
             print()
             _print_status(status, as_json=False)
 
-        # 只有"硬失败"才返回 1；压缩未启用属于提示级
+        # Only "hard failures" return 1; compression being unavailable is advisory only
         hard_failures = [
             c for c in checks if not c["ok"] and c["item"] in {"API Key 可用", "工具树可构建"}
         ]
@@ -249,7 +256,7 @@ def _cmd_service_doctor(args: argparse.Namespace) -> int:
 
 
 def _cmd_service_sweep(args: argparse.Namespace) -> int:
-    """``harness service sweep``：驱逐空闲会话。"""
+    """``harness service sweep``: evict idle sessions."""
     service = build_service(args.workdir, load_model=False)
     try:
         evicted = service.sweep()
@@ -265,7 +272,7 @@ def _cmd_service_sweep(args: argparse.Namespace) -> int:
 
 
 def _cmd_service_tree(args: argparse.Namespace) -> int:
-    """``harness service tree``：打印工具树索引。"""
+    """``harness service tree``: print the tool-tree index."""
     service = build_service(args.workdir, load_model=False)
     try:
         if service.tree is None:
@@ -287,12 +294,12 @@ def _cmd_service_tree(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
-# config 子命令
+# config subcommands
 # ---------------------------------------------------------------------------
 
 
 def _cmd_config_show(args: argparse.Namespace) -> int:
-    """``harness config show``：展示全部默认值（可选合并模型配置）。"""
+    """``harness config show``: show every default (optionally merged with model config)."""
     groups = defaults_as_dict()
     payload: dict[str, Any] = {"defaults": groups}
 
@@ -331,7 +338,7 @@ def _cmd_config_show(args: argparse.Namespace) -> int:
 
 
 def _cmd_config_get(args: argparse.Namespace) -> int:
-    """``harness config get <key>``：查询单个超参数。"""
+    """``harness config get <key>``: query a single hyperparameter."""
     flat = _flatten_defaults()
     try:
         resolved, value = _resolve_key(args.key, flat)
@@ -348,7 +355,7 @@ def _cmd_config_get(args: argparse.Namespace) -> int:
 
 
 def _cmd_config_check(args: argparse.Namespace) -> int:
-    """``harness config check``：校验环境变量与数值合法性。"""
+    """``harness config check``: validate environment variables and numeric values."""
     try:
         config = load_llm_config(dotenv_path=Path(args.workdir).resolve() / ".env")
     except ConfigError as exc:
@@ -380,7 +387,10 @@ def _cmd_config_check(args: argparse.Namespace) -> int:
 
 
 def _cmd_config_env(args: argparse.Namespace) -> int:
-    """``harness config env``：列出所需环境变量与当前取值（密钥掩码）。"""
+    """``harness config env``: list required environment variables and current values.
+
+    Secrets are masked.
+    """
     rows = [
         ("DEEPSEEK_API_KEY", "必填，密钥"),
         ("DEEPSEEK_BASE_URL", "端点基址"),
@@ -412,7 +422,7 @@ def _cmd_config_env(args: argparse.Namespace) -> int:
 
 
 def _cmd_config_init(args: argparse.Namespace) -> int:
-    """``harness config init``：生成 ``.env`` 模板。"""
+    """``harness config init``: generate an ``.env`` template."""
     target = Path(args.workdir).resolve() / args.output
     if target.exists() and not args.force:
         print(f"目标已存在: {target}（使用 --force 覆盖）", file=sys.stderr)
@@ -425,11 +435,11 @@ def _cmd_config_init(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
-# tools / skills 子命令
+# tools / skills subcommands
 # ---------------------------------------------------------------------------
 
 
-#: 预设分组：``harness tools add --preset <名>``。
+#: Preset groups: ``harness tools add --preset <name>``.
 TOOL_PRESETS: dict[str, tuple[str, ...]] = {
     "core": ("/tool/os/file/read", "/tool/os/file/list", "/tool/os/file/write", "/tool/os/echo"),
     "coding": (
@@ -451,7 +461,7 @@ TOOL_PRESETS: dict[str, tuple[str, ...]] = {
     "all": tuple(BUILTIN_TOOL_PATHS),
 }
 
-#: 预设名称 → 说明（保持与 ``TOOL_PRESETS`` 同步）。
+#: Preset name -> description (kept in sync with ``TOOL_PRESETS``).
 PRESET_HINTS: dict[str, str] = {
     "core": "最小文件读写（4 个）",
     "coding": "编码闭环：读写 + 语法检查 + 短运行 + shell",
@@ -462,7 +472,7 @@ PRESET_HINTS: dict[str, str] = {
 
 
 def _load_or_empty(workdir: str) -> CapabilityManifest:
-    """读取清单；不存在时返回空清单（供 ``add`` 首次使用）。"""
+    """Read the manifest; returns an empty manifest when absent (for the first ``add``)."""
     try:
         return load_manifest(workdir)
     except CapabilityError as exc:
@@ -472,7 +482,7 @@ def _load_or_empty(workdir: str) -> CapabilityManifest:
 
 
 def _save_and_report(manifest: CapabilityManifest, workdir: str, *, as_json: bool) -> None:
-    """保存清单并输出摘要。"""
+    """Save the manifest and print a summary."""
     target = save_manifest(manifest, workdir)
     if as_json:
         _print_json({**manifest.to_dict(), "file": str(target)})
@@ -482,7 +492,7 @@ def _save_and_report(manifest: CapabilityManifest, workdir: str, *, as_json: boo
 
 
 def _print_capabilities(manifest: CapabilityManifest, *, as_json: bool) -> None:
-    """打印当前清单（按分组聚合）。"""
+    """Print the current manifest (grouped)."""
     if as_json:
         _print_json(manifest.to_dict())
         return
@@ -514,7 +524,7 @@ def _print_capabilities(manifest: CapabilityManifest, *, as_json: bool) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 分组命令
+# Group commands
 # ---------------------------------------------------------------------------
 
 
@@ -588,7 +598,7 @@ def _cmd_groups_remove(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
-# 外来工具命令
+# External tool commands
 # ---------------------------------------------------------------------------
 
 
@@ -645,7 +655,7 @@ def _cmd_tools_add_ext(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
-# MCP 命令
+# MCP commands
 # ---------------------------------------------------------------------------
 
 
@@ -655,12 +665,14 @@ def _cmd_mcp_add(args: argparse.Namespace) -> int:
 
     workdir = args.workdir
 
-    # 参数来源合并：--arg 逐个给，--args-file 从文件按行读（处理大量 -- 开头的参数）
+    # Merge argument sources: --arg one by one, --args-file line by line (handles
+    # many arguments starting with --)
     server_args: list[str] = list(args.arg or ())
     if args.args_file:
         try:
-            # utf-8-sig：Windows 上 PowerShell 的 Out-File 默认写 BOM，
-            # 不剥离会让第一个参数带上 \ufeff，服务器因此找不到脚本。
+            # utf-8-sig: on Windows, PowerShell's Out-File writes a BOM by default;
+            # not stripping it leaves \ufeff on the first argument, and the server
+            # then cannot find the script.
             lines = Path(args.args_file).read_text(encoding="utf-8-sig").splitlines()
         except OSError as exc:
             print(f"无法读取参数文件: {exc}", file=sys.stderr)
@@ -785,7 +797,7 @@ def _cmd_mcp_remove(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
-# 权限命令
+# permission commands
 # ---------------------------------------------------------------------------
 
 
@@ -1071,7 +1083,7 @@ def _cmd_skills_show(args: argparse.Namespace) -> int:
 
 
 def _frontmatter_value(text: str, key: str) -> str:
-    """从 ``SKILL.md`` 的 YAML frontmatter 读取单个标量值。"""
+    """Read a single scalar value from a ``SKILL.md`` YAML frontmatter."""
     if not text.startswith("---"):
         return ""
     end = text.find("\n---", 3)
@@ -1086,12 +1098,16 @@ def _frontmatter_value(text: str, key: str) -> str:
 
 
 def _strip_to_skill(text: str) -> str:
-    """保证落盘内容以 frontmatter 开头（去 BOM / 前导空行）。"""
+    """Ensure persisted content starts with frontmatter (strip BOM and leading blank lines)."""
     return text.lstrip("\ufeff").lstrip()
 
 
 def _fetch_skill_source(url: str) -> tuple[str, dict[str, str]]:
-    """下载 skill 来源；``*.md`` 单文件，其余视作 zip 包（仅取顶层 md）。"""
+    """Fetch a skill source.
+
+    A ``*.md`` URL is a single file; anything else is treated as a zip
+    (top-level md files only).
+    """
     import io
     import urllib.request
     import zipfile
@@ -1115,15 +1131,17 @@ def _fetch_skill_source(url: str) -> tuple[str, dict[str, str]]:
 
 
 # ---------------------------------------------------------------------------
-# 解析器
+# Parser
 # ---------------------------------------------------------------------------
 
 
 def _add_common_options(parser: argparse.ArgumentParser) -> None:
-    """为子命令补充常用参数，使其既能放在子命令前也能放在其后。
+    """Add common arguments to a subcommand so they work before or after it.
 
-    ``argparse`` 的父级选项必须在子命令之前给出；这里在每个子命令上再声明一次，
-    冲突由 ``argparse.SUPPRESS`` 默认值处理——子命令未给出时不会覆盖全局值。
+    ``argparse`` parent options must appear before the subcommand; they are
+    re-declared on each subcommand here, and conflicts are handled by the
+    ``argparse.SUPPRESS`` default -- when a subcommand omits them, the global
+    value is not overwritten.
     """
     parser.add_argument(
         "--workdir",
@@ -1139,7 +1157,7 @@ def _add_common_options(parser: argparse.ArgumentParser) -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    """构建 CLI 解析器。"""
+    """Build the CLI parser."""
     parser = argparse.ArgumentParser(
         prog="harness",
         description="Harness 服务管理 / 超参数配置 / 配置加载",
