@@ -22,6 +22,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from harness.capabilities import (
+    CapabilityError,
+    CapabilityManifest,
+    load_manifest,
+)
 from harness.config import ConfigError, LLMConfig, build_proxy, load_llm_config
 from harness.context import ContextAssembler
 from harness.defaults import (
@@ -157,6 +162,8 @@ class HarnessService:
         self.config: LLMConfig | None = None
         self.flat_store: FlatStore | None = None
         self.tree: ToolTree | None = None
+        #: 按 ``.agent/capabilities.json`` 装载的能力清单；未装载时为 None。
+        self.capabilities: CapabilityManifest | None = None
         self.registry: SessionRegistry | None = None
         self.store: SessionStore | None = None
         self.proxy: ReverseProxy | None = None
@@ -174,9 +181,23 @@ class HarnessService:
     # ------------------------------------------------------------ 装配
 
     def _load_capability(self) -> None:
-        """装配工具能力层（扁平存储 + 派生树）。"""
+        """装配工具能力层（扁平存储 + 派生树）。
+
+        ponytail: 必须读 ``.agent/capabilities.json``，否则 CLI 看到的是一棵空树，
+        而 Web 服务按清单装载了实际工具——两边观测到的能力面不一致。
+        清单不存在或非法时退回空树（保守降级，与 I4 一致）。
+        """
         try:
             self.flat_store = FlatStore()
+            try:
+                manifest = load_manifest(self.workdir)
+            except CapabilityError as exc:
+                self.problems.append(f"capability: {exc}")
+                manifest = None
+            if manifest is not None:
+                for entry in manifest.to_tooldefs(str(self.workdir)):
+                    self.flat_store.put(entry)
+                self.capabilities = manifest
             self.tree = build_tree(self.flat_store, AgentPermissions(agent_id="local"))
         except Exception as exc:  # noqa: BLE001 - 组合根必须降级而非崩溃
             self.problems.append(f"capability: {exc}")
