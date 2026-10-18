@@ -25,6 +25,7 @@ from typing import Any, Callable
 
 from harness.permission import CapName, Permission
 from harness.tool_tree import ToolDef
+from harness.tools_fluid import fluid_check, fluid_probe
 
 __all__ = [
     "TOOL_SPECS",
@@ -446,6 +447,12 @@ TOOL_SPECS: dict[str, dict[str, Any]] = {
               {"path": {"type": "string", "default": "snake_game"},
                "steps": {"type": "integer", "default": 200},
                "seed": {"type": "integer", "default": 7}},
+              [], ["exec"]),
+        _spec("/tool/fluid/check", fluid_check, "流体仿真结构验收：文件/API/不依赖 pygame",
+              {"path": {"type": "string", "default": "fluid"}}, [], ["read"], True),
+        _spec("/tool/fluid/probe", fluid_probe, "流体物理验收：跑 N 步查守恒/边界/静置",
+              {"path": {"type": "string", "default": "fluid"},
+               "steps": {"type": "integer", "default": 500}},
               [], ["exec"]),
         _spec("/mcp/fs/list", mcp_fs_list, "MCP filesystem：列出目录（URI 语义）",
               {"path": {"type": "string", "default": "."}}, [], ["read"], True),

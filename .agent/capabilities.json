@@ -43,6 +43,22 @@
       "idempotent": false
     },
     {
+      "path": "/tool/fluid/check",
+      "description": "流体仿真结构验收：文件/API/不依赖 pygame",
+      "caps": [
+        "read"
+      ],
+      "idempotent": true
+    },
+    {
+      "path": "/tool/fluid/probe",
+      "description": "流体物理验收：跑 N 步查守恒/边界/静置",
+      "caps": [
+        "exec"
+      ],
+      "idempotent": false
+    },
+    {
       "path": "/tool/game/snake/check",
       "description": "贪吃蛇验收：结构/语法/常见缺陷",
       "caps": [
@@ -100,6 +116,13 @@
     }
   ],
   "skills": [
+    {
+      "name": "fluid-particle-sim",
+      "description": "用 pygame + 粒子法做二维液态水仿真：密度约束不可压缩、重力积分、边界碰撞、固体遮挡。用于编写或验收 fluid 项目。",
+      "source": ".agent/skills/fluid-particle-sim/SKILL.md",
+      "dir": ".agent/skills/fluid-particle-sim",
+      "extra_files": []
+    },
     {
       "name": "incremental-delivery",
       "description": "小步交付并每步验证：先骨架后功能、每次只改一处、改完立即自检、失败先读错误再动手。用于多文件工程任务。",
