@@ -1,1 +1,0 @@
-{"session_id":"sess-42","step":0,"ts":1792325678.2162821,"kind":"llm_call","payload":{"model":"m","tokens_in":1,"tokens_out":2,"duration_ms":3.0,"tool_call_count":0}}

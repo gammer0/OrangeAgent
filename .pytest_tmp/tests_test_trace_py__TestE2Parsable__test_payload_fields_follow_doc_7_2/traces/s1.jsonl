@@ -1,7 +1,0 @@
-{"session_id":"s1","step":0,"ts":1792325678.2283063,"kind":"llm_call","payload":{"model":"gpt","tokens_in":10,"tokens_out":20,"duration_ms":30.0,"tool_call_count":2}}
-{"session_id":"s1","step":1,"ts":1792325678.2287395,"kind":"tool_exec","payload":{"path":"/tool/os","tool_id":"c1","arguments":"{}","ok":false,"error_type":"ToolError","duration_ms":1.0}}
-{"session_id":"s1","step":2,"ts":1792325678.2292945,"kind":"compress","payload":{"level":2,"before_tokens":9,"after_tokens":3,"summary_chars":4}}
-{"session_id":"s1","step":2,"ts":1792325678.2296925,"kind":"inject","payload":{"channel":"control","content_chars":5}}
-{"session_id":"s1","step":3,"ts":1792325678.2301545,"kind":"error","payload":{"error_type":"LLMError","message":"boom","retry_count":1}}
-{"session_id":"s1","step":3,"ts":1792325678.2304637,"kind":"abort","payload":{"reason":"stop","coalesced":true}}
-{"session_id":"s1","step":4,"ts":1792325678.2307909,"kind":"memory_extract","payload":{"status":"failed","entries_added":0,"duration_ms":0.5}}

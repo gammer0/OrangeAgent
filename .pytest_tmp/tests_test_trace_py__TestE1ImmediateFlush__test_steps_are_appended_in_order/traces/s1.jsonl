@@ -1,5 +1,0 @@
-{"session_id":"s1","step":0,"ts":1792325678.2212918,"kind":"abort","payload":{"reason":"user","coalesced":false}}
-{"session_id":"s1","step":1,"ts":1792325678.222008,"kind":"abort","payload":{"reason":"user","coalesced":false}}
-{"session_id":"s1","step":2,"ts":1792325678.22236,"kind":"abort","payload":{"reason":"user","coalesced":false}}
-{"session_id":"s1","step":3,"ts":1792325678.2227697,"kind":"abort","payload":{"reason":"user","coalesced":false}}
-{"session_id":"s1","step":4,"ts":1792325678.2230911,"kind":"abort","payload":{"reason":"user","coalesced":false}}
