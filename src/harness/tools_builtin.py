@@ -133,6 +133,54 @@ def file_append(workdir: str, path: str, content: str) -> str:
     return f"已追加 {len(content)} 字符到 {path}"
 
 
+# ---------------------------------------------------------------------------
+# 工作记忆（专用读写，不开放任意路径）
+# ---------------------------------------------------------------------------
+
+#: 工作记忆相对路径（与 ``memory.py`` 保持一致，避免两处定义漂移）。
+_WORK_MEMORY_REL = ".agent/WORK.md"
+
+
+def _work_memory_file(workdir: str) -> Path:
+    """返回工作记忆文件的绝对路径（固定，不接受模型传参）。"""
+    return _resolve(workdir, _WORK_MEMORY_REL)
+
+
+def memory_work_read(workdir: str, offset: int = 0, limit: int = 400) -> str:
+    """读取工作记忆。路径固定，模型无法指定别的文件。"""
+    target = _work_memory_file(workdir)
+    if not target.is_file():
+        return f"（工作记忆尚不存在：{_WORK_MEMORY_REL}）"
+    return file_read(workdir, _WORK_MEMORY_REL, offset=offset, limit=limit)
+
+
+def memory_work_append(workdir: str, content: str) -> str:
+    """向工作记忆追加一段内容。
+
+    追加而非覆盖：工作记忆跨会话共享，覆盖会抹掉别的会话的记录。
+    """
+    if not content.strip():
+        raise ValueError("content 不能为空")
+    target = _work_memory_file(workdir)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    suffix = "" if content.endswith("\n") else "\n"
+    with target.open("a", encoding="utf-8", newline="\n") as handle:
+        handle.write(content + suffix)
+    return f"已追加 {len(content)} 字符到 {_WORK_MEMORY_REL}（累计 {target.stat().st_size} 字节）"
+
+
+def memory_work_replace(workdir: str, content: str) -> str:
+    """整体重写工作记忆（用于整理归纳）。
+
+    与 ``file_write`` 的区别：路径固定为工作记忆，无法写到别处。
+    """
+    target = _work_memory_file(workdir)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    text = content if content.endswith("\n") else content + "\n"
+    target.write_text(text, encoding="utf-8", newline="\n")
+    return f"已重写 {_WORK_MEMORY_REL}：{len(text)} 字符"
+
+
 def os_echo(text: str) -> str:
     """原样返回文本。"""
     return text
@@ -568,6 +616,15 @@ TOOL_SPECS: dict[str, dict[str, Any]] = {
         _spec("/tool/net/http/head", net_head, "HTTP HEAD，只取状态与响应头",
               {"url": _STR, "timeout": {"type": "integer", "default": HTTP_TIMEOUT_S}},
               ["url"], ["net"], True, "global"),
+        # ---- 工作记忆（路径固定，不开放任意写入）----
+        _spec("/tool/memory/work/read", memory_work_read, "读取工作记忆 .agent/WORK.md",
+              {"offset": {"type": "integer", "default": 0},
+               "limit": {"type": "integer", "default": 400}},
+              [], ["read"], True),
+        _spec("/tool/memory/work/append", memory_work_append, "追加一段到工作记忆（不覆盖）",
+              {"content": _STR}, ["content"], ["write"]),
+        _spec("/tool/memory/work/replace", memory_work_replace, "整体重写工作记忆（整理用）",
+              {"content": _STR}, ["content"], ["write"]),
     ]
 }
 

@@ -36,6 +36,8 @@ __all__ = [
     "extract_principle_path",
     "read_working_memory",
     "write_working_memory_atomic",
+    "ensure_working_memory",
+    "WORK_MEMORY_TEMPLATE",
     "MemoryEntry",
     "ProjectMemory",
     "MemoryExtraction",
@@ -160,6 +162,67 @@ def write_working_memory_atomic(workdir: str | os.PathLike[str], text: str) -> P
     path = work_memory_path(workdir)
     _atomic_write_text(path, text)
     return path
+
+
+#: 新建工作记忆时的初始内容。
+#:
+#: 刻意保持极简：只是一份骨架，不预设结构。工作记忆是自由文本（C1），
+#: 系统不解析它，所以模板不该暗示任何格式约束。
+WORK_MEMORY_TEMPLATE = """# 工作记忆
+
+> 本文件由 Harness 自动创建，同工作目录的多个会话共享。
+> 用 /tool/memory/work/{read,append,replace} 读写；系统不解析其结构。
+
+## 当前状态
+
+（尚未记录）
+
+## 关键决定
+
+（尚未记录）
+
+## 待办与风险
+
+（尚未记录）
+"""
+
+
+def ensure_working_memory(
+    workdir: str | os.PathLike[str],
+    *,
+    template: str | None = None,
+) -> tuple[Path, bool]:
+    """确保工作记忆文件存在；不存在则用模板创建。
+
+    系统提示会告诉模型「本项目存在 ``.agent/WORK.md``」，但从不创建它——
+    模型第一次去读时会拿到「文件不存在」，与提示词自相矛盾。本函数在
+    服务装配阶段补齐这个前提。
+
+    **只在文件缺失时创建**：绝不覆盖已有内容。工作记忆是跨会话共享的，
+    覆盖等于抹掉别的会话刚写下的结论。
+
+    Args:
+        workdir: 工作目录。
+        template: 初始内容；省略时用 :data:`WORK_MEMORY_TEMPLATE`。
+
+    Returns:
+        ``(路径, 是否新建)``。已存在时返回 ``(路径, False)``。
+
+    Raises:
+        ValueError: ``workdir`` 不是有效目录。
+        OSError: 创建失败（权限等），由调用方决定是否降级。
+    """
+    base = Path(workdir)
+    if not base.is_dir():
+        raise ValueError(f"工作目录不存在或不是目录: {base}")
+
+    path = work_memory_path(base)
+    if path.is_file():
+        return path, False
+
+    # 走原子写：与普通写入共用临时文件 + replace，避免并发创建时留下半截文件
+    _atomic_write_text(path, template if template is not None else WORK_MEMORY_TEMPLATE)
+    return path, True
 
 
 # --------------------------------------------------------------- 长期记忆（C7）

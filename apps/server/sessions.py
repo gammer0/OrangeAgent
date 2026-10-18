@@ -31,14 +31,16 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
-from harness.context import ContextAssembler, SystemPromptParts
 from harness.capabilities import CapabilityError, CapabilityManifest, load_manifest
+from harness.context import ContextAssembler, SystemPromptParts
 from harness.executor import execute_batch
 from harness.inbox import Inbox
 from harness.jev import JevRouter
 from harness.loop import AgentLoop, LoopHooks, StepController
+from harness.memory import ensure_working_memory
 from harness.message import AssistantMsg, Message, SystemMsg, ToolCall, ToolMsg, UserMsg
 from harness.model import ReverseProxy
 from harness.permission import AgentPermissions
@@ -331,7 +333,6 @@ class SessionRunner:
         与主循环共享 ``proxy``，但用独立 ``session_id`` 后缀，避免污染主会话的
         用量归集；**不传 tools**，模型只能回文本，不会再次触发工具调用。
         """
-        from harness.message import SystemMsg, UserMsg
 
         # ponytail: 分块预算要扣掉头部标记的长度（如"[这是第 1/3 段...]"），
         # 否则拼接后会略超 SUMMARY_INPUT_CHARS。
@@ -663,6 +664,10 @@ class SessionManager:
         self.tools = DemoToolRegistry(workdir)
         self.capabilities: CapabilityManifest | None = None
         self.capability_error: str | None = None
+        #: 工作记忆文件路径与本次是否新建（诊断用）。
+        self.work_memory: Path | None = None
+        self.work_memory_created = False
+        self.work_memory_error: str | None = None
         self.load_capabilities(workdir)
         self._sessions: dict[str, SessionRunner] = {}
         self._lock = threading.Lock()
@@ -681,7 +686,19 @@ class SessionManager:
 
         清单是**运维面**：装载失败不应让服务起不来，因此错误只记录在
         ``capability_error``，由 ``/api/health`` 暴露给前端。
+
+        顺手补齐工作记忆文件：系统提示会告诉模型 ``.agent/WORK.md`` 存在，
+        服务启动时不创建就会自相矛盾。失败同样只记录，不阻止服务启动。
         """
+        try:
+            path, created = ensure_working_memory(workdir)
+            self.work_memory = path
+            self.work_memory_created = created
+        except Exception as exc:  # noqa: BLE001 - 降级而非崩溃
+            self.work_memory = None
+            self.work_memory_created = False
+            self.work_memory_error = str(exc)
+
         try:
             manifest = load_manifest(workdir)
         except CapabilityError as exc:

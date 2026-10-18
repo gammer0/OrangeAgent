@@ -149,6 +149,69 @@
       }
     },
     {
+      "path": "/tool/memory/work/append",
+      "description": "追加一段到工作记忆（不覆盖）",
+      "caps": [
+        "write"
+      ],
+      "idempotent": false,
+      "builtin": "memory/work/append",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "content": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "content"
+        ]
+      }
+    },
+    {
+      "path": "/tool/memory/work/read",
+      "description": "读取工作记忆 .agent/WORK.md",
+      "caps": [
+        "read"
+      ],
+      "idempotent": true,
+      "builtin": "memory/work/read",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "offset": {
+            "type": "integer",
+            "default": 0
+          },
+          "limit": {
+            "type": "integer",
+            "default": 400
+          }
+        },
+        "required": []
+      }
+    },
+    {
+      "path": "/tool/memory/work/replace",
+      "description": "整体重写工作记忆（整理用）",
+      "caps": [
+        "write"
+      ],
+      "idempotent": false,
+      "builtin": "memory/work/replace",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "content": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "content"
+        ]
+      }
+    },
+    {
       "path": "/tool/net/http/get",
       "description": "HTTP GET，返回状态/类型/正文（截断）",
       "caps": [

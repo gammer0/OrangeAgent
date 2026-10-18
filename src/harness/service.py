@@ -36,6 +36,7 @@ from harness.defaults import (
     DEFAULT_TOOLS,
 )
 from harness.discovery import DiscoveredTools, TreeQueryState, TreeSessionState
+from harness.memory import ensure_working_memory
 from harness.model import ReverseProxy
 from harness.permission import AgentPermissions
 from harness.permission_store import LOCAL_AGENT, load_permissions
@@ -170,10 +171,14 @@ class HarnessService:
         self.store: SessionStore | None = None
         self.proxy: ReverseProxy | None = None
         self.assembler: ContextAssembler | None = None
+        #: 工作记忆文件路径与本次是否新建（诊断用）。
+        self.work_memory: Path | None = None
+        self.work_memory_created = False
 
         #: 是否尝试加载模型通道；``False`` 时该层状态为 ``not_loaded`` 而非降级
         self.model_requested = load_model
 
+        self._ensure_work_memory()
         self._load_capability()
         self._load_session()
         self._load_context()
@@ -181,6 +186,23 @@ class HarnessService:
             self._load_model()
 
     # ------------------------------------------------------------ 装配
+
+    def _ensure_work_memory(self) -> None:
+        """确保 ``<workdir>/.agent/WORK.md`` 存在（缺失时用模板创建）。
+
+        系统提示会告诉模型「本项目存在 ``.agent/WORK.md``」，但之前从未真的
+        创建它——模型第一次去读会拿到「文件不存在」，与提示词自相矛盾。
+
+        **失败不阻止启动**：工作记忆是辅助手段，没有它 agent 仍可工作，
+        因此只记入 ``problems`` 而不抛异常。
+        """
+        try:
+            path, created = ensure_working_memory(self.workdir)
+            self.work_memory = path
+            self.work_memory_created = created
+        except Exception as exc:  # noqa: BLE001 - 降级而非崩溃
+            self.problems.append(f"work_memory: {exc}")
+
 
     def _load_capability(self) -> None:
         """装配工具能力层（扁平存储 + 派生树）。
