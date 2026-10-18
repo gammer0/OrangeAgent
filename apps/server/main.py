@@ -301,10 +301,19 @@ def create_app(workdir: str | Path | None = None) -> FastAPI:
 
     @app.get("/api/sessions/{session_id}/events")
     async def stream_events(session_id: str, request: Request) -> StreamingResponse:
-        """SSE event stream: assistant / tool / route / compress / usage / state / error."""
+        """SSE event stream: assistant / tool / route / compress / usage / state / error.
+
+        Each connection subscribes independently (broadcast fan-out), so opening a
+        second tab cannot steal events from the first. ``Last-Event-ID`` replays
+        whatever the client missed while disconnected.
+        """
         runner = _require(manager_or_503(), session_id)
+        try:
+            after_seq = int(request.headers.get("last-event-id") or 0)
+        except ValueError:
+            after_seq = 0
         return StreamingResponse(
-            _event_stream(runner, request),
+            _event_stream(runner, request, after_seq),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
@@ -320,41 +329,52 @@ def _require(manager: SessionManager, session_id: str) -> SessionRunner:
     return runner
 
 
-async def _event_stream(runner: SessionRunner, request: Request) -> AsyncIterator[bytes]:
-    """Convert the session event queue into SSE frames.
+async def _event_stream(
+    runner: SessionRunner,
+    request: Request,
+    after_seq: int = 0,
+) -> AsyncIterator[bytes]:
+    """Convert one subscriber's event queue into SSE frames.
 
-    A heartbeat comment is sent every 15 seconds so intermediary proxies do not
-    drop the idle connection.
+    The queue is private to this connection (see ``SessionRunner.subscribe``) and
+    unsubscribed on exit, so a closed tab releases its buffer instead of leaking
+    it. A heartbeat comment is sent every 15 seconds so intermediary proxies do
+    not drop an idle connection.
     """
     loop = asyncio.get_running_loop()
+    subscription = runner.subscribe(after_seq)
     last_heartbeat = loop.time()
 
-    while True:
-        if await request.is_disconnected():
-            break
-
-        try:
-            event = await asyncio.wait_for(
-                loop.run_in_executor(None, _poll, runner, 1.0), timeout=1.5
-            )
-        except TimeoutError:
-            event = None
-
-        if event is not None:
-            data = json.dumps(event.to_dict(), ensure_ascii=False)
-            yield f"id: {event.seq}\ndata: {data}\n\n".encode()
-            last_heartbeat = loop.time()
-            continue
-
-        if loop.time() - last_heartbeat > 15:
-            yield b": ping\n\n"
-            last_heartbeat = loop.time()
-
-
-def _poll(runner: SessionRunner, timeout: float) -> Any:
-    """Wait for one event on the blocking queue (runs in a thread pool)."""
     try:
-        return runner.events.get(timeout=timeout)
+        while True:
+            if await request.is_disconnected():
+                break
+
+            try:
+                event = await asyncio.wait_for(
+                    loop.run_in_executor(None, _poll, subscription, 1.0),
+                    timeout=1.5,
+                )
+            except TimeoutError:
+                event = None
+
+            if event is not None:
+                data = json.dumps(event.to_dict(), ensure_ascii=False)
+                yield f"id: {event.seq}\ndata: {data}\n\n".encode()
+                last_heartbeat = loop.time()
+                continue
+
+            if loop.time() - last_heartbeat > 15:
+                yield b": ping\n\n"
+                last_heartbeat = loop.time()
+    finally:
+        runner.unsubscribe(subscription)
+
+
+def _poll(q: Any, timeout: float) -> Any:
+    """Wait for one event on a blocking queue (runs in a thread pool)."""
+    try:
+        return q.get(timeout=timeout)
     except queue.Empty:
         return None
 

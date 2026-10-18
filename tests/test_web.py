@@ -231,12 +231,14 @@ class TestSessionRunner:
             model="fake",
             capacity=10_000,
         )
+        # 订阅在启动前建立，否则会错过本轮事件
+        subscription = runner.subscribe()
         assert runner.start("测试")
         runner._thread.join(timeout=10)
 
         kinds = []
-        while not runner.events.empty():
-            kinds.append(runner.events.get_nowait().kind)
+        while not subscription.empty():
+            kinds.append(subscription.get_nowait().kind)
 
         # 用户消息由前端本地渲染，不经 inject 事件（避免重复）
         assert "assistant" in kinds
@@ -297,12 +299,13 @@ class TestSessionRunner:
             tools=tools,
             model="fake",
         )
+        subscription = runner.subscribe()
         runner.start("问一句")
         runner._thread.join(timeout=10)
 
         finals = []
-        while not runner.events.empty():
-            event = runner.events.get_nowait()
+        while not subscription.empty():
+            event = subscription.get_nowait()
             if event.kind == "assistant" and event.payload.get("final"):
                 finals.append(event.payload)
         assert len(finals) == 1

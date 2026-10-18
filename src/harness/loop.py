@@ -211,6 +211,8 @@ class LoopHooks:
     Attributes:
         on_assistant: Called after a model reply (for persistence / tracing).
         on_group_done: Called after each ``ExecGroup`` completes and is backfilled.
+        on_batch_done: Called once a whole tool batch has been backfilled into the
+            message list, so callers can observe the tool results themselves.
         on_inject: Called after each injected user message.
         on_abort: Called when an abort happens (control signal); the argument is
             the reason.
@@ -219,6 +221,7 @@ class LoopHooks:
 
     on_assistant: Callable[[AssistantMsg], None] | None = None
     on_group_done: Callable[[int], None] | None = None
+    on_batch_done: Callable[[Sequence[Message]], None] | None = None
     on_inject: Callable[[UserMsg, str], None] | None = None
     on_abort: Callable[[str], None] | None = None
     on_summary: Callable[[str], None] | None = None
@@ -363,6 +366,12 @@ class AgentLoop:
             # ---- Tool batch ----
             plan = plan_batch(list(assistant.tool_calls), self._concurrency_of)
             stop_after = self._execute(plan, messages)
+
+            # Notify listeners once the whole batch has been backfilled into
+            # ``messages``. ``on_group_done`` fires before the results exist, so it
+            # cannot report them; this hook can.
+            if self.hooks.on_batch_done is not None:
+                self.hooks.on_batch_done(messages)
 
             if stop_after is not None:
                 # D7 / G1: fill placeholders after stopping the remaining groups,

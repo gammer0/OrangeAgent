@@ -74,9 +74,12 @@ _PERSIST_STATUS: dict[str, str] = {
     "ended": "ended",
 }
 
-#: Event queue cap; the oldest events are dropped beyond it so a slow client
-#: cannot drag the service down.
+#: Per-subscriber queue cap; the oldest events are dropped beyond it so a slow
+#: client cannot drag the service down.
 EVENT_QUEUE_MAX = 2_000
+
+#: Number of recent events retained for replay to a late or reconnecting client.
+EVENT_REPLAY_MAX = 500
 
 
 @dataclass(frozen=True, slots=True)
@@ -258,9 +261,6 @@ class SessionRunner:
 
     inbox: Inbox = field(default_factory=Inbox)
     messages: list[Message] = field(default_factory=list)
-    events: queue.Queue[SessionEvent] = field(
-        default_factory=lambda: queue.Queue(maxsize=EVENT_QUEUE_MAX)
-    )
     state: str = "idle"
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
@@ -283,6 +283,20 @@ class SessionRunner:
     _timestamps: dict[int, float] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        # Broadcast fan-out. A single shared queue would hand every event to
+        # exactly one reader, so a second tab (or a reconnect while the old
+        # connection is still draining) silently steals events from the first --
+        # which leaves the UI stuck on "running". Instead every SSE client gets
+        # its own queue, and recent events are retained so a late subscriber can
+        # be replayed up to the point it connects.
+        self._subscribers: list[queue.Queue[SessionEvent]] = []
+        self._recent: list[SessionEvent] = []
+        #: Recently issued tool calls by id, so the trace can show the arguments
+        #: when the matching result arrives (see _on_assistant / _on_group_done).
+        self._calls_by_id: dict[str, ToolCall] = {}
+        #: Messages already reflected in the trace; anything after this index is
+        #: new and still needs a tool event.
+        self._traced_count: int = 0
         self.assembler = ContextAssembler(
             capacity=self.capacity,
             summarizer=self._summarize,
@@ -295,6 +309,9 @@ class SessionRunner:
             )
         )
         self.messages = [self.system]
+        # Trace cursor: everything already in ``messages`` counts as announced, so
+        # a fresh or restored session never replays its history into the panel.
+        self._traced_count = len(self.messages)
 
     # ----------------------------------------------------------- summary
 
@@ -428,19 +445,58 @@ class SessionRunner:
     # -------------------------------------------------------------- events
 
     def emit(self, kind: str, payload: dict[str, Any]) -> None:
-        """Append one event (dropping the oldest when the queue is full)."""
+        """Publish one event to every current subscriber (dropping on overflow)."""
         with self._lock:
             self._seq += 1
             event = SessionEvent(self._seq, time.time(), kind, payload)
-        try:
-            self.events.put_nowait(event)
-        except queue.Full:
+            # Retain a bounded history for late subscribers.
+            self._recent.append(event)
+            if len(self._recent) > EVENT_REPLAY_MAX:
+                del self._recent[: len(self._recent) - EVENT_REPLAY_MAX]
+            subscribers = list(self._subscribers)
+        for sub in subscribers:
             try:
-                self.events.get_nowait()
-                self.events.put_nowait(event)
-            except queue.Empty:  # pragma: no cover - race fallback
-                pass
+                sub.put_nowait(event)
+            except queue.Full:
+                # A slow reader must not stall the producer: drop its oldest.
+                try:
+                    sub.get_nowait()
+                    sub.put_nowait(event)
+                except (queue.Empty, queue.Full):  # pragma: no cover - race fallback
+                    pass
         self.updated_at = time.time()
+
+    # ---------------------------------------------------------- streaming
+
+    def subscribe(self, after_seq: int = 0) -> queue.Queue[SessionEvent]:
+        """Register a new SSE consumer and return its private queue.
+
+        Args:
+            after_seq: Only replay retained events with ``seq > after_seq``. Pass
+                ``0`` for "everything still retained", or the last seq the client
+                processed when reconnecting (``Last-Event-ID``) to avoid
+                duplicates.
+
+        Returns:
+            A queue that receives every future event plus the replay backlog.
+        """
+        q: queue.Queue[SessionEvent] = queue.Queue(maxsize=EVENT_QUEUE_MAX)
+        with self._lock:
+            backlog = [e for e in self._recent if e.seq > after_seq]
+            # Register before filling so no event can slip between the two steps.
+            self._subscribers.append(q)
+        for event in backlog:
+            try:
+                q.put_nowait(event)
+            except queue.Full:  # pragma: no cover - backlog never exceeds capacity
+                break
+        return q
+
+    def unsubscribe(self, q: queue.Queue[SessionEvent]) -> None:
+        """Remove a consumer's queue (idempotent)."""
+        with self._lock:
+            if q in self._subscribers:
+                self._subscribers.remove(q)
 
     def _set_state(self, state: str, detail: str = "") -> None:
         self.state = state
@@ -542,10 +598,15 @@ class SessionRunner:
     def _run_once(self) -> None:
         """Run one complete ReAct loop and translate the process into events."""
         self._set_state("running")
+        # The trace cursor is maintained by _on_group_done (it always points just
+        # past what has already been announced), so it must not be reset here:
+        # start() has already appended this turn's UserMsg.
+        self._calls_by_id.clear()
 
         hooks = LoopHooks(
             on_assistant=self._on_assistant,
             on_group_done=self._on_group_done,
+            on_batch_done=self._on_batch_done,
             on_inject=self._on_inject,
             on_abort=self._on_abort,
             on_summary=self._on_summary,
@@ -648,6 +709,10 @@ class SessionRunner:
     # -------------------------------------------------------------- hooks
 
     def _on_assistant(self, message: AssistantMsg) -> None:
+        # Remember this reply's calls so the trace can show their arguments when
+        # the matching tool results arrive later (see _on_group_done).
+        for call in message.tool_calls:
+            self._calls_by_id[call.id] = call
         self.emit(
             "assistant",
             {
@@ -662,21 +727,37 @@ class SessionRunner:
 
     def _on_group_done(self, index: int) -> None:
         # P1 / H7: one ExecGroup has just been committed, which is exactly the
-        # transaction boundary the design mandates. The tool results of this group
-        # are backfilled by AgentLoop only after the batch finishes, so flush here
-        # (assistant reply) and again in _run_once's finally (tool results) --
-        # both calls are incremental thanks to persisted_count.
+        # transaction boundary the design mandates. This fires before the results
+        # are backfilled, so it flushes the assistant reply; the tool events are
+        # emitted later by _on_batch_done.
         self.persist_pending()
-        for message in self.messages[-8:]:
-            if isinstance(message, ToolMsg):
-                self.emit(
-                    "tool",
-                    {
-                        "group": index,
-                        "path": message.name,
-                        "preview": message.content[:400],
-                    },
-                )
+
+    def _on_batch_done(self, messages: list[Message]) -> None:
+        """Announce the tool results of a completed batch to the trace panel.
+
+        The conversation pane no longer renders tool cards, so this is the only
+        surface where a call is visible. Results are paired with the arguments
+        cached in :meth:`_on_assistant` (keyed by ``tool_call_id``), which works
+        regardless of how far back the producing ``AssistantMsg`` now sits.
+        """
+        # Only results this turn produced may be emitted, otherwise earlier rounds
+        # would be re-announced as tool events with empty arguments.
+        for message in messages[self._traced_count :]:
+            if not isinstance(message, ToolMsg):
+                continue
+            call = self._calls_by_id.pop(message.tool_call_id, None)
+            self.emit(
+                "tool",
+                {
+                    "path": message.name,
+                    "preview": message.content[:400],
+                    "content": message.content,
+                    "tool_call_id": message.tool_call_id,
+                    "arguments": call.arguments if call is not None else "",
+                },
+            )
+        self._traced_count = len(messages)
+        self.persist_pending()
 
     def _on_inject(self, message: UserMsg, channel: str) -> None:
         self.emit("inject", {"channel": channel, "text": message.content})
@@ -888,6 +969,9 @@ class SessionManager:
             # the whole history.
             runner.messages = [runner.system, *history]
             runner.persisted_count = len(runner.messages)
+        # Restored history counts as already announced; the trace panel only shows
+        # live events.
+        runner._traced_count = len(runner.messages)
         runner.state = "idle"
         runner.store = self.store
         # A restored session never resumes by itself; it waits for the user.
