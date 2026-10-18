@@ -30,6 +30,7 @@ kind         Meaning
 
 from __future__ import annotations
 
+import contextlib
 import queue
 import threading
 import time
@@ -49,7 +50,8 @@ from harness.message import AssistantMsg, Message, SystemMsg, ToolCall, ToolMsg,
 from harness.model import ReverseProxy
 from harness.permission import AgentPermissions
 from harness.permission_store import WEB_AGENT, load_permissions
-from harness.session import Session
+from harness.session import Session, SessionRecord
+from harness.session_store import SessionStore
 from harness.tool_tree import EMPTY_SCHEMA, FlatStore, ToolDef, build_tree
 
 __all__ = [
@@ -58,6 +60,19 @@ __all__ = [
     "SessionManager",
     "DemoToolRegistry",
 ]
+
+#: Web session state -> persisted ``sessions.status`` (the core status vocabulary
+#: is only ``active | idle | ended``). ``running`` maps to ``active``; the
+#: terminal web states (done/aborted/error) map to ``idle`` because the session is
+#: still resumable.
+_PERSIST_STATUS: dict[str, str] = {
+    "running": "active",
+    "idle": "idle",
+    "done": "idle",
+    "aborted": "idle",
+    "error": "idle",
+    "ended": "ended",
+}
 
 #: Event queue cap; the oldest events are dropped beyond it so a slow client
 #: cannot drag the service down.
@@ -252,6 +267,12 @@ class SessionRunner:
     #: Core-layer session object (S4): lets the registry's eviction policy observe
     #: the real busy/idle state.
     core_session: Any = None
+    #: SQLite persistence (P1). ``None`` degrades to memory-only operation.
+    store: Any = None
+    #: Number of messages already written to SQLite. Everything before this index
+    #: is durable; everything from it on is still memory-only. This cursor is what
+    #: makes persistence incremental instead of rewriting the whole history.
+    persisted_count: int = 0
 
     _seq: int = 0
     _lock: threading.Lock = field(default_factory=threading.Lock)
@@ -431,7 +452,61 @@ class SessionRunner:
                 core.busy()
             elif state in {"done", "aborted", "error", "idle"}:
                 core.release()
+        # P1: durable status must follow the in-memory state machine, otherwise a
+        # restart would resurrect sessions in the wrong state.
+        self.persist_status(state)
         self.emit("state", {"state": state, "detail": detail})
+
+    # --------------------------------------------------------- persistence
+
+    def persist_status(self, status: str | None = None) -> None:
+        """Write this session's row to SQLite (status defaults to ``self.state``).
+
+        Failures are swallowed on purpose: persistence is a durability feature,
+        so a disk problem must never take down a live conversation.
+        """
+        if self.store is None:
+            return
+        mapped = _PERSIST_STATUS.get(status or self.state, "idle")
+        try:
+            self.store.update_status(self.session_id, mapped)
+        except Exception as exc:  # noqa: BLE001 - persistence must not break the turn
+            self.emit("error", {"message": f"persistence: {exc}"})
+
+    def persist_pending(self) -> int:
+        """Flush every not-yet-persisted message to SQLite in one transaction.
+
+        The transaction unit is the batch produced between two safe points — one
+        ``ExecGroup``'s assistant reply plus its backfilled tool results — which
+        satisfies H7. ``SystemMsg`` is skipped (H6): the context layer rebuilds it
+        from the current tool tree on restore.
+
+        Returns:
+            The number of messages written by this call.
+        """
+        if self.store is None:
+            return 0
+        anchor = self.persisted_count
+        if anchor >= len(self.messages):
+            return 0
+        pending = [
+            message
+            for message in self.messages[anchor:]
+            if not isinstance(message, SystemMsg)
+        ]
+        # Advance the cursor even when only a SystemMsg was pending, otherwise the
+        # next call would rescan the same slice forever.
+        self.persisted_count = len(self.messages)
+        if not pending:
+            return 0
+        try:
+            self.store.append_messages(self.session_id, pending)
+        except Exception as exc:  # noqa: BLE001 - persistence must not break the turn
+            # Restore the anchor so the next safe point retries this batch.
+            self.persisted_count = anchor
+            self.emit("error", {"message": f"persistence: {exc}"})
+            return 0
+        return len(pending)
 
     # --------------------------------------------------------------- run
 
@@ -447,6 +522,9 @@ class SessionRunner:
         self._cancelled = False
         self.messages.append(UserMsg(content=text))
         self._timestamps[len(self.messages) - 1] = time.time()
+        # P1: persist the user turn immediately -- if the process dies mid-reasoning,
+        # the request the user typed must survive.
+        self.persist_pending()
         # Note: do not emit inject here -- when AgentLoop inserts at a safe point
         # it fires the ``on_inject`` hook, avoiding duplicate user messages in
         # the frontend.
@@ -516,6 +594,11 @@ class SessionRunner:
         except Exception as exc:  # noqa: BLE001 - session isolation: one failure must not affect the service
             self.emit("error", {"message": str(exc)})
             self._set_state("error", str(exc))
+        finally:
+            # P1: the loop mutates a working copy, so the runner's own list is only
+            # authoritative once results are back. Flush whatever is still pending
+            # so a crash right after this turn cannot lose the answer.
+            self.persist_pending()
 
     def _model_client(self) -> Any:
         """Adapt ReverseProxy to the orchestration layer's ``chat(messages)`` protocol."""
@@ -578,6 +661,12 @@ class SessionRunner:
         )
 
     def _on_group_done(self, index: int) -> None:
+        # P1 / H7: one ExecGroup has just been committed, which is exactly the
+        # transaction boundary the design mandates. The tool results of this group
+        # are backfilled by AgentLoop only after the batch finishes, so flush here
+        # (assistant reply) and again in _run_once's finally (tool results) --
+        # both calls are incremental thanks to persisted_count.
+        self.persist_pending()
         for message in self.messages[-8:]:
             if isinstance(message, ToolMsg):
                 self.emit(
@@ -720,6 +809,94 @@ class SessionManager:
             self.registry.start_sweeper()
         except Exception:  # noqa: BLE001
             self.registry = None
+        # SQLite persistence (P1): None means memory-only (e.g. read-only workdir).
+        self.store = self._open_store()
+
+    def _open_store(self) -> SessionStore | None:
+        """Open the session database; ``None`` degrades to memory-only operation.
+
+        Persistence is a durability enhancement, so an unusable database (read-only
+        directory, locked file) must not prevent the service from starting.
+        """
+        try:
+            store = SessionStore(self.workdir)
+            store.list_sessions()  # triggers connection + schema creation
+            return store
+        except Exception:  # noqa: BLE001 - degrade instead of crashing
+            return None
+
+    # ------------------------------------------------------- restore on boot
+
+    #: How many historical sessions to bring back into memory at startup.
+    RESTORE_LIMIT = 10
+
+    def restore(self) -> list[SessionRunner]:
+        """Rebuild previously persisted sessions from SQLite.
+
+        Only the most recent :attr:`RESTORE_LIMIT` sessions are resurrected, and
+        none are started (no thread), so a restart is cheap. The persisted
+        ``SystemMsg`` does not exist (H6); ``SessionRunner.__post_init__`` rebuilds
+        it from the *current* tool tree, which is why restore step 4 assigns that
+        job to the context layer.
+
+        Returns:
+            The runners that were restored, newest first.
+        """
+        if self.store is None:
+            return []
+        try:
+            records = self.store.list_sessions()
+        except Exception:  # noqa: BLE001 - a corrupt DB must not block startup
+            return []
+
+        restored: list[SessionRunner] = []
+        for record in reversed(records):
+            if len(restored) >= self.RESTORE_LIMIT:
+                break
+            if record.status == "ended":
+                continue
+            runner = self._restore_one(record)
+            if runner is not None:
+                restored.append(runner)
+        return restored
+
+    def _restore_one(self, record: SessionRecord) -> SessionRunner | None:
+        """Rebuild a single ``SessionRunner`` from its persisted row and messages."""
+        try:
+            restored = self.store.restore(record.session_id) if self.store else None
+            history = restored.messages if restored is not None else []
+        except Exception:  # noqa: BLE001 - skip a session with a damaged history
+            history = []
+
+        try:
+            runner = SessionRunner(
+                session_id=record.session_id,
+                workdir=self.workdir,
+                proxy=self.proxy,
+                tools=self.tools,
+                model=self.default_model,
+                capacity=self.capacity,
+                created_at=record.created_at,
+                updated_at=record.updated_at,
+            )
+        except Exception:  # noqa: BLE001
+            return None
+
+        if history:
+            # Append after the freshly assembled SystemMsg (H6) and move the
+            # persistence cursor past it, otherwise the next flush would duplicate
+            # the whole history.
+            runner.messages = [runner.system, *history]
+            runner.persisted_count = len(runner.messages)
+        runner.state = "idle"
+        runner.store = self.store
+        # A restored session never resumes by itself; it waits for the user.
+        if self.registry is not None:
+            core = Session(session_id=record.session_id, working_dir=self.workdir)
+            runner.core_session = core
+            self.registry.add(core)
+        self._sessions[record.session_id] = runner
+        return runner
 
     @property
     def compress_available(self) -> bool:
@@ -789,6 +966,14 @@ class SessionManager:
                     raise RuntimeError("会话数已达上限，且没有可淘汰的空闲会话")
                 victim = min(idle, key=lambda s: s.updated_at)
                 self._sessions.pop(victim.session_id, None)
+                # P1: eviction from memory must not lose data -- the victim is
+                # flushed and then left resumable in SQLite.
+                victim.persist_pending()
+                if self.store is not None:
+                    with contextlib.suppress(Exception):
+                        self.store.update_status(victim.session_id, "idle")
+                if self.registry is not None:
+                    self.registry.remove(victim.session_id)
 
             session_id = uuid.uuid4().hex[:12]
             runner = SessionRunner(
@@ -799,6 +984,23 @@ class SessionManager:
                 model=model or self.default_model,
                 capacity=capacity or self.capacity,
             )
+            # P1: the sessions row must exist before any message row (the messages
+            # table has a foreign key on it).
+            runner.store = self.store
+            if self.store is not None:
+                try:
+                    self.store.upsert_session(
+                        SessionRecord(
+                            session_id=session_id,
+                            working_dir=runner.workdir,
+                            created_at=runner.created_at,
+                            updated_at=runner.updated_at,
+                            status="idle",
+                        )
+                    )
+                    runner.persisted_count = len(runner.messages)
+                except Exception:  # noqa: BLE001 - keep the session usable anyway
+                    runner.store = None
             # S4: register with the core registry so idle-timeout/capacity eviction
             # actually covers web sessions.
             if self.registry is not None:
@@ -817,13 +1019,24 @@ class SessionManager:
         return sorted(self._sessions.values(), key=lambda s: s.created_at, reverse=True)
 
     def delete(self, session_id: str) -> bool:
-        """Delete a session; a running session is aborted first."""
+        """Delete a session; a running session is aborted first.
+
+        The row is marked ``ended`` rather than deleted (H13): the history stays on
+        disk for audit, and ``restore()`` skips ended sessions so they do not come
+        back after a restart.
+        """
         with self._lock:
             runner = self._sessions.pop(session_id, None)
         if runner is None:
             return False
         if runner.running:
             runner.cancel()
+        # P1: flush what is still in memory, then mark the session ended (H13).
+        runner.persist_pending()
+        if self.store is not None:
+            # A failed status update must still let the in-memory delete succeed.
+            with contextlib.suppress(Exception):
+                self.store.update_status(session_id, "ended")
         # S4: remove the core session in sync so no ghost entry is left in the registry
         if self.registry is not None:
             self.registry.end(session_id)
