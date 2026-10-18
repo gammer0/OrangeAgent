@@ -1,24 +1,30 @@
-"""上下文装配器（C1/C2/C3 的编排者，``SystemMsg`` 五段装配）。
+"""Context assembler (the C1/C2/C3 orchestrator, plus five-section ``SystemMsg`` assembly).
 
-对应文档：
+See:
 
-* docs/02-数据结构设计/03-消息.md §3.3（五段组成、A0a–A0e）
-* docs/01-系统架构设计.md §4.3（水位与压缩）、§4.5.1（五段来源）
+* docs/02-data-structures/03-messages.md §3.3 (five sections, A0a-A0e)
+* docs/01-architecture.md §4.3 (watermarks and compression), §4.5.1 (section sources)
 
-职责边界：
+Responsibility boundaries:
 
-* **是**唯一构造 ``SystemMsg`` 的地方——五段顺序、分隔符、逐字节稳定性都在这里收口。
-* **是** C1/C2/C3 的调用方：装配前先判定水位，必要时压缩，再投影给 provider。
-* **不是** 工具执行器，**不是** 会话存储。
+* **Is** the only place that builds a ``SystemMsg`` -- section order, separators
+  and byte stability all converge here.
+* **Is** the caller of C1/C2/C3: judge the watermark first, compress when
+  needed, then project for the provider.
+* **Is not** a tool executor and **is not** session storage.
 
-关键不变量：
+Key invariants:
 
-* **A0a / I1**：``SystemMsg.content`` 在会话内逐字节不变。因此装配一次后必须缓存，
-  后续 ``assemble`` 直接复用，不重新拼接。
-* **A0b**：工作记忆正文不进 ``SystemMsg``，第 1 段只说明读写模式。
-* **A0c**：第 3 段只列长期记忆文件名，不列路径与正文。
-* **A0d**：第 5 段放末尾，且不含 ``session_id`` 等系统标识。
-* **I5**：每个水位只触发一次（由 ``Watermark`` 记账）。
+* **A0a / I1**: ``SystemMsg.content`` is byte-stable within a session. It must
+  therefore be cached after the first assembly; later ``assemble`` calls reuse
+  it instead of rebuilding.
+* **A0b**: the working-memory body never enters ``SystemMsg``; section 1 only
+  describes how to read and write it.
+* **A0c**: section 3 lists the long-term memory file name only, never its path
+  or contents.
+* **A0d**: section 5 goes last and contains no system identifiers such as
+  ``session_id``.
+* **I5**: each watermark fires once (tracked by ``Watermark``).
 """
 
 from __future__ import annotations
@@ -41,13 +47,14 @@ __all__ = [
     "DEFAULT_ROLE_GUIDE",
 ]
 
-#: A0a：五段之间的固定分隔符。
+#: A0a: fixed separator between the five sections.
 SEGMENT_SEPARATOR = "\n\n"
 
-#: A0c：长期记忆文件名（全系统唯一，不含路径与正文）。
+#: A0c: long-term memory file name (system-wide unique; no path, no contents).
 LONG_TERM_MEMORY_NAME = "MEMORY.md"
 
-#: 第 1 段：系统要求（代码内常量）。
+#: Section 1: system requirements (in-code constant).
+#: Note: this text is model-visible, so it intentionally stays in Chinese.
 DEFAULT_SYSTEM_REQUIREMENTS = """你是运行在 Harness 平台上的智能体。
 
 ## 响应格式
@@ -63,7 +70,8 @@ DEFAULT_SYSTEM_REQUIREMENTS = """你是运行在 Harness 平台上的智能体�
 - 追加是安全的（不会覆盖别人写的内容），重写要谨慎。
 - 读写结果都会以工具结果的形式返回给你。""".strip()
 
-#: 第 4 段：角色与行为准则（代码内常量）。
+#: Section 4: role and behavioral guidelines (in-code constant).
+#: Note: this text is model-visible, so it intentionally stays in Chinese.
 DEFAULT_ROLE_GUIDE = """## 角色
 你是一名严谨的工程助手：先理解目标，再动手；不确定时先查证，不臆测。
 
@@ -73,22 +81,24 @@ DEFAULT_ROLE_GUIDE = """## 角色
 - 长输出先摘要再引用，不要把大段原始内容复述给用户。
 - 不隐瞒不确定性：做不到、没验证、有风险，都要明说。""".strip()
 
-#: 摘要器签名：``(text) -> summary``。由调用方注入（复用主模型通道）。
+#: Summarizer signature: ``(text) -> summary``. Injected by the caller (reusing
+#: the main model channel).
 Summarizer = Callable[[str], str]
 
 
 @dataclass(frozen=True, slots=True)
 class SystemPromptParts:
-    """``SystemMsg`` 五段的输入素材。
+    """Input material for the five ``SystemMsg`` sections.
 
     Attributes:
-        tool_index: 第 2 段，``ToolTree.tree_index()`` 的产物；为空时该段留空。
-        memory_name: 第 3 段，长期记忆文件名。
-        working_dir: 第 5 段，工作目录绝对路径。
-        work_memory_relative_path: 第 5 段，工作记忆相对路径。
-        goal: 第 5 段，可选目标。
-        system_requirements: 第 1 段，默认取模块常量。
-        role_guide: 第 4 段，默认取模块常量。
+        tool_index: Section 2, the output of ``ToolTree.tree_index()``; blank when
+            empty.
+        memory_name: Section 3, the long-term memory file name.
+        working_dir: Section 5, the absolute path of the working directory.
+        work_memory_relative_path: Section 5, the working-memory relative path.
+        goal: Section 5, an optional goal.
+        system_requirements: Section 1, defaults to the module constant.
+        role_guide: Section 4, defaults to the module constant.
     """
 
     tool_index: str = ""
@@ -100,9 +110,9 @@ class SystemPromptParts:
     role_guide: str = DEFAULT_ROLE_GUIDE
 
     def session_context(self) -> str:
-        """第 5 段：会话上下文（工作目录 + 工作记忆相对路径 + 可选目标）。
+        """Section 5: session context (working directory + work-memory path + optional goal).
 
-        A0d：不得出现 ``session_id`` / 租户 / 创建时间等系统标识。
+        A0d: no system identifiers such as ``session_id``, tenant or creation time.
         """
         lines = [
             f"工作目录: {self.working_dir or '(未指定)'}",
@@ -113,10 +123,11 @@ class SystemPromptParts:
         return "\n".join(lines)
 
     def render(self) -> str:
-        """按 A0a 的固定顺序与分隔符拼接五段。
+        """Join the five sections in A0a's fixed order with the fixed separator.
 
-        空的第 2 / 3 段会以空字符串占位，保证**段数恒定**——
-        这样无论工具树是否为空，第 5 段的位置都不变，前缀稳定性不被破坏。
+        Empty sections 2 / 3 are filled with an empty string so the **section
+        count stays constant** -- section 5's position never shifts whether or
+        not the tool tree is empty, preserving prefix stability.
         """
         segments = [
             self.system_requirements,
@@ -130,14 +141,17 @@ class SystemPromptParts:
 
 @dataclass
 class AssembleResult:
-    """一次装配的结果。
+    """Result of one assembly.
 
     Attributes:
-        messages: 可直接发送给模型的消息列表（已压缩、已通过水位判定）。
-        system: 会话级 ``SystemMsg``（缓存实例，后续直接复用）。
-        judged: 本次水位判定结果；``None`` 表示未判定（如缓存命中且无需判定）。
-        compressed: 是否发生压缩。
-        action: 水位动作（``normal`` / ``compress_1`` / ``compress_2`` / ``session_end``）。
+        messages: Message list ready to send to the model (compressed, watermark
+            decided).
+        system: The session-level ``SystemMsg`` (cached instance, reused later).
+        judged: This round's watermark decision; ``None`` when not judged (e.g.
+            cache hit with nothing to decide).
+        compressed: Whether compression happened.
+        action: Watermark action (``normal`` / ``compress_1`` / ``compress_2`` /
+            ``session_end``).
     """
 
     messages: list[Message]
@@ -149,15 +163,18 @@ class AssembleResult:
 
 @dataclass
 class ContextAssembler:
-    """扁平 messages 装配 + C1/C2/C3 编排。
+    """Flat message assembly plus C1/C2/C3 orchestration.
 
     Attributes:
-        capacity: 模型上下文上限（token）。
-        watermark: 会话级水位记录；由调用方随 ``Session`` 持有。
-        summarizer: C3 使用的摘要函数；未注入时压缩会被跳过（保守退化，I4）。
-        keep_records_50: 50% 水位保留的 CallRecord 数。
-        keep_records_75: 75% 水位保留的 CallRecord 数。
-        enable_auto_compress: 关闭后只做水位判定不做压缩（便于测试与降级）。
+        capacity: Model context limit (tokens).
+        watermark: Session-level watermark record; held by the caller alongside
+            ``Session``.
+        summarizer: Summarizer used by C3; when absent compression is skipped
+            (conservative degradation, I4).
+        keep_records_50: Number of CallRecords kept at the 50% watermark.
+        keep_records_75: Number of CallRecords kept at the 75% watermark.
+        enable_auto_compress: When disabled only watermark decisions happen, no
+            compression (useful for tests and degradation).
     """
 
     capacity: int
@@ -170,17 +187,17 @@ class ContextAssembler:
 
     def __post_init__(self) -> None:
         if self.capacity <= 0:
-            raise ValueError(f"capacity 必须为正数，实际为 {self.capacity}")
+            raise ValueError(f"capacity must be positive, got {self.capacity}")
         if self.watermark is None:
             self.watermark = Watermark(capacity=self.capacity)
 
     # ------------------------------------------------------------ SystemMsg
 
     def build_system(self, parts: SystemPromptParts) -> SystemMsg:
-        """装配 ``SystemMsg``（A0a：只装配一次，之后逐字节复用）。
+        """Assemble the ``SystemMsg`` (A0a: assemble once, then reuse byte-for-byte).
 
-        若已缓存则直接返回缓存实例——调用方即使在工具树变化后再次调用，
-        也不会改变会话前缀（I1）。
+        A cached instance is returned directly -- even if the caller invokes this
+        again after the tool tree changed, the session prefix never changes (I1).
         """
         if self._system is None:
             self._system = SystemMsg(content=parts.render())
@@ -188,27 +205,29 @@ class ContextAssembler:
 
     @property
     def system(self) -> SystemMsg | None:
-        """已缓存的 ``SystemMsg``；尚未装配时为 ``None``。"""
+        """The cached ``SystemMsg``; ``None`` before the first assembly."""
         return self._system
 
     @property
     def compress_available(self) -> bool:
-        """C3 压缩当前是否真的可用。
+        """Whether C3 compression is actually available right now.
 
-        ponytail: 没有摘要器时压缩会被静默跳过（I4 保守退化），
-        运维面需要这个信号才能发现"压缩从未发生"。
+        Note: without a summarizer compression is silently skipped (conservative
+        I4 degradation); operations need this signal to notice that "compression
+        never happened".
         """
         return self.enable_auto_compress and self.summarizer is not None
 
     def reset_system(self) -> None:
-        """丢弃缓存的 ``SystemMsg``。
+        """Discard the cached ``SystemMsg``.
 
-        仅用于**新会话**（``Session`` 重建）。会话内调用会破坏 I1，
-        因此不作为常规接口暴露给编排层使用。
+        Only for a **new session** (``Session`` rebuild). Calling it mid-session
+        breaks I1, so it is not exposed to the orchestration layer as a normal
+        interface.
         """
         self._system = None
 
-    # ------------------------------------------------------------ 装配
+    # ----------------------------------------------------------- assembly
 
     def assemble(
         self,
@@ -216,16 +235,17 @@ class ContextAssembler:
         *,
         clear_trace_state: Callable[[], None] | None = None,
     ) -> AssembleResult:
-        """判定水位 → 必要时压缩 → 返回可发送的消息列表。
+        """Judge the watermark, compress if needed, and return the messages to send.
 
         Args:
-            messages: 会话历史（含 ``SystemMsg``）。
-            clear_trace_state: 压缩发生后回调，用于清空
-                ``TreeQueryState.delivered`` 与 ``DiscoveredTools``（B14 / 文档 §4.6）。
+            messages: Session history (including the ``SystemMsg``).
+            clear_trace_state: Callback invoked after compression, used to clear
+                ``TreeQueryState.delivered`` and ``DiscoveredTools`` (B14 / doc §4.6).
 
         Returns:
-            :class:`AssembleResult`；``action == "session_end"`` 时**不压缩**，
-            调用方应触发收尾（写轨迹 + 结算记忆 + 提示开新会话）。
+            :class:`AssembleResult`; when ``action == "session_end"`` no
+            compression occurs and the caller should wrap up (write traces +
+            settle memory + suggest a new session).
         """
         history = list(messages)
         if not history:
@@ -235,7 +255,7 @@ class ContextAssembler:
         action = judged.action
 
         if action == "session_end":
-            # I5：≥85% 只收尾，不压缩
+            # I5: >=85% wraps up only, no compression
             return AssembleResult(
                 messages=history,
                 system=_system_of(history),
@@ -245,7 +265,8 @@ class ContextAssembler:
             )
 
         if action == "normal" or not self.enable_auto_compress or self.summarizer is None:
-            # I4：优化失败必须无损退化——没有摘要器就按朴素实现继续
+            # I4: a missing optimization must degrade losslessly -- without a
+            # summarizer we continue with the naive path.
             return AssembleResult(
                 messages=history,
                 system=_system_of(history),
@@ -255,8 +276,9 @@ class ContextAssembler:
             )
 
         level = 50 if action == "compress_1" else 75
-        # ponytail: 两个 keep 字段默认 None，传 None 给 compress 才会走
-        # default_keep_records()；显式算默认值会导致"保留全部记录、无可压缩"。
+        # Note: both keep fields default to None; only passing None lets compress
+        # fall back to default_keep_records(). Computing the default explicitly
+        # would mean "keep every record, nothing compressible".
         keep = self.keep_records_50 if level == 50 else self.keep_records_75
 
         try:
@@ -265,13 +287,15 @@ class ContextAssembler:
                 level,
                 self.summarizer,
                 keep_records=keep,
-                # ponytail: 记账权统一在 assemble——compress 内部记账会让
-                # "压了但没效果"也被计为已用，导致剩余水位无法再尝试。
+                # Note: recording happens in assemble only -- letting compress
+                # record internally would count "compressed but no effect" as used,
+                # blocking the remaining watermarks from trying.
                 watermark=None,
             )
         except ValueError as exc:
-            # 水位已记账或记录不足以切分：无损退化，不阻断主流程（I4）
-            # ponytail: 保留原因，避免"压缩静默失败"再次不可观测。
+            # Watermark already recorded, or too few records to split: degrade
+            # losslessly and never block the main flow (I4).
+            # Note: keep the reason so "compression silently failed" stays observable.
             self.last_compress_error = str(exc)
             return AssembleResult(
                 messages=history,
@@ -284,17 +308,19 @@ class ContextAssembler:
         if clear_trace_state is not None:
             clear_trace_state()
 
-        # ponytail: compress() 在"记录不足以切分"时返回 ``list(messages)``——
-        # 一个新的浅拷贝对象，用 ``is not history`` 判断会永远为 True，
-        # 导致重复报 compressed 并消耗水位，实测会无限循环。
-        # 因此按「长度或内容是否真的变化」判断。
+        # Note: when there are too few records to split, compress() returns
+        # ``list(messages)`` -- a new shallow copy. Testing ``is not history``
+        # would therefore always be True, reporting compressed repeatedly and
+        # consuming watermarks; we observed an infinite loop. So decide by
+        # "did the length or contents actually change".
         actually_compressed = len(compressed_messages) != len(history) or any(
             before is not after
             for before, after in zip(history, compressed_messages, strict=False)
         )
-        # ponytail: 无论压缩是否真的生效都要记账。否则 compress() 因
-        # "记录不足以切分"原样返回时，judge() 会反复返回同一水位，
-        # 永远推进不到 session_end（实测会卡在 compress_1 空转）。
+        # Note: record the watermark whether or not compression had an effect.
+        # Otherwise, when compress() returns the input unchanged (too few records
+        # to split), judge() keeps returning the same watermark and never reaches
+        # session_end (we observed it stuck spinning on compress_1).
         self.watermark.mark_compressed(level)
         return AssembleResult(
             messages=compressed_messages,
@@ -304,33 +330,35 @@ class ContextAssembler:
             action=action,
         )
 
-    # ------------------------------------------------------------ 便捷方法
+    # ------------------------------------------------------- convenience
 
     def estimate(self, messages: Sequence[Message]) -> int:
-        """估算消息列表的 token 数（C2）。"""
+        """Estimate the token count of a message list (C2)."""
         return estimate_messages_tokens(list(messages))
 
     def ratio(self, messages: Sequence[Message]) -> float:
-        """当前占用比例，供界面展示。"""
+        """Current occupancy ratio, for UI display."""
         return self.estimate(messages) / self.capacity
 
 
 def _system_of(messages: Sequence[Message]) -> SystemMsg:
-    """取 ``messages[0]`` 并校验其为 ``SystemMsg``（A1）。"""
+    """Take ``messages[0]`` and verify it is a ``SystemMsg`` (A1)."""
     head = messages[0]
     if not isinstance(head, SystemMsg):
-        raise ValueError(f"A1: messages[0] 必须是 SystemMsg，实际为 {type(head).__name__}")
+        raise ValueError(f"A1: messages[0] must be SystemMsg, got {type(head).__name__}")
     return head
 
 
 def clear_after_compress(state: TreeSessionState) -> Callable[[], None]:
-    """构造压缩后清空会话级树查询状态的回调（B14 / 文档 §4.6）。
+    """Build a callback that clears session-level tree query state after compression.
+
+    See B14 and design doc §4.6.
 
     Args:
-        state: 会话级 ``TreeQueryState`` + ``DiscoveredTools`` 门面。
+        state: Session-level ``TreeQueryState`` + ``DiscoveredTools`` facade.
 
     Returns:
-        无参回调；压缩发生后调用它即可同步清空两处缓存。
+        A no-argument callback; calling it after compression clears both caches.
     """
 
     def _clear() -> None:
@@ -340,7 +368,7 @@ def clear_after_compress(state: TreeSessionState) -> Callable[[], None]:
 
 
 def has_unclosed_tool_calls(messages: Sequence[Message]) -> bool:
-    """是否存在未配对的 ``tool_calls``（I2 / I6 的前置检查）。"""
+    """Whether any ``tool_calls`` remain unpaired (the prerequisite check for I2 / I6)."""
     pending: set[str] = set()
     for msg in messages:
         if isinstance(msg, AssistantMsg):
@@ -351,7 +379,7 @@ def has_unclosed_tool_calls(messages: Sequence[Message]) -> bool:
 
 
 def last_user_text(messages: Sequence[Message]) -> str:
-    """取最近一条 ``UserMsg`` 的文本（Jev 路由的 query 来源）。"""
+    """Return the text of the most recent ``UserMsg`` (the query source for Jev routing)."""
     for msg in reversed(messages):
         if isinstance(msg, UserMsg):
             return msg.content
