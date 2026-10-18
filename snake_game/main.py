@@ -171,8 +171,15 @@ def build_frame(game: SnakeGame, color: Palette, paused: bool, fps: float) -> li
 
 
 def draw(lines: list[str]) -> None:
-    """光标归位后一次性写整屏，再清掉尾部残留。"""
-    sys.stdout.write("\x1b[H" + "\n".join(lines) + "\n\x1b[J")
+    """光标归位后逐行重绘，每行写完立即清到行尾。
+
+    每行末尾的 \x1b[K（EL，Erase in Line）从光标清到本行行尾，
+    专门解决「新行比旧行短时旧字符残留」；末尾的 \x1b[J（ED）
+    只负责清掉整屏多出来的下方行（如游戏结束/暂停行消失后）。
+    """
+    sys.stdout.write(
+        "\x1b[H" + "\n".join(line + "\x1b[K" for line in lines) + "\n\x1b[J"
+    )
     sys.stdout.flush()
 
 
