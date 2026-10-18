@@ -1,30 +1,32 @@
-"""FastAPI 服务层：REST + SSE，为前端提供多会话、模型选择与实时推理流。
+"""FastAPI service layer: REST + SSE, exposing multi-session, model selection and
+live inference streaming to the frontend.
 
-**边界说明**：本目录是**服务层**，可以依赖 FastAPI；
-核心 ``src/harness`` 仍保持零 Web 框架（由 ``scripts/check_constraints.py`` 守护）。
+**Boundary note**: this directory is the **service layer** and may depend on
+FastAPI; the core ``src/harness`` still keeps zero web-framework dependencies
+(enforced by ``scripts/check_constraints.py``).
 
-启动::
+Start::
 
     uv run uvicorn apps.server.main:app --reload --port 8000
 
-接口一览：
+Endpoints:
 
 =========================== ====== ====================================
-方法                         路径    说明
+Method                      Path   Description
 =========================== ====== ====================================
-GET                         /           前端页面
-GET                         /api/health 服务健康
-GET                         /api/models 可用模型列表
-GET                         /api/tools  工具目录（路径 + 描述 + schema）
-GET                         /api/sessions           会话列表
-POST                        /api/sessions           新建会话
-GET                         /api/sessions/{id}      会话详情（可含消息）
-PATCH                       /api/sessions/{id}      修改模型
-DELETE                      /api/sessions/{id}      删除会话
-GET                         /api/sessions/{id}/messages 会话历史
-POST                        /api/sessions/{id}/messages 发送消息（触发推理）
-POST                        /api/sessions/{id}/cancel    中止本轮
-GET                         /api/sessions/{id}/events    SSE 事件流
+GET                         /           frontend page
+GET                         /api/health service health
+GET                         /api/models available models
+GET                         /api/tools  tool catalogue (path + description + schema)
+GET                         /api/sessions           list sessions
+POST                        /api/sessions           create a session
+GET                         /api/sessions/{id}      session detail (may include messages)
+PATCH                       /api/sessions/{id}      change the model
+DELETE                      /api/sessions/{id}      delete the session
+GET                         /api/sessions/{id}/messages session history
+POST                        /api/sessions/{id}/messages send a message (triggers inference)
+POST                        /api/sessions/{id}/cancel   abort this turn
+GET                         /api/sessions/{id}/events   SSE event stream
 =========================== ====== ====================================
 """
 
@@ -53,19 +55,19 @@ STATIC_DIR = APP_DIR / "static"
 
 
 # ---------------------------------------------------------------------------
-# 请求 / 响应模型
+# Request / response models
 # ---------------------------------------------------------------------------
 
 
 class NewSessionBody(BaseModel):
-    """新建会话请求体。"""
+    """Create-session request body."""
 
     model: str | None = Field(default=None, description="模型名，省略用默认")
     capacity: int | None = Field(default=None, gt=0, description="上下文容量")
 
 
 class SendMessageBody(BaseModel):
-    """发送消息请求体。"""
+    """Send-message request body."""
 
     text: str = Field(min_length=1, description="用户消息")
     channel: str = Field(
@@ -74,18 +76,18 @@ class SendMessageBody(BaseModel):
 
 
 class UpdateSessionBody(BaseModel):
-    """修改会话请求体。"""
+    """Update-session request body."""
 
     model: str | None = None
 
 
 # ---------------------------------------------------------------------------
-# 应用生命周期
+# Application lifecycle
 # ---------------------------------------------------------------------------
 
 
 class _State:
-    """进程级状态：模型代理与会话管理器。"""
+    """Process-level state: the model proxy and the session manager."""
 
     def __init__(self) -> None:
         self.manager: SessionManager | None = None
@@ -94,10 +96,11 @@ class _State:
 
 
 def _build_manager(workdir: Path) -> tuple[SessionManager | None, str | None]:
-    """构建会话管理器。
+    """Build the session manager.
 
     Returns:
-        ``(manager, error)``；配置缺失时 manager 为 ``None``，error 说明原因。
+        ``(manager, error)``; ``manager`` is ``None`` when configuration is
+        missing, with ``error`` explaining why.
     """
     try:
         config = load_llm_config(dotenv_path=workdir / ".env")
@@ -109,7 +112,8 @@ def _build_manager(workdir: Path) -> tuple[SessionManager | None, str | None]:
         max_requests=120,
         max_tokens_per_window=400_000,
     )
-    # 确保限流窗口存在（build_proxy 已创建，此处仅示意可覆盖）
+    # Ensure the rate window exists (build_proxy already created it; shown here as
+    # an override point)
     assert isinstance(proxy.rate_window, RateWindow)
 
     manager = SessionManager(
@@ -122,13 +126,14 @@ def _build_manager(workdir: Path) -> tuple[SessionManager | None, str | None]:
 
 
 def create_app(workdir: str | Path | None = None) -> FastAPI:
-    """构建 FastAPI 应用。
+    """Build the FastAPI application.
 
     Args:
-        workdir: 工作目录（``.env`` 与工具根都相对它）；省略时取当前目录。
+        workdir: Working directory (both ``.env`` and the tool root are relative
+            to it); defaults to the current directory.
 
     Returns:
-        可直接交给 uvicorn 的 ``FastAPI`` 实例。
+        A ``FastAPI`` instance ready for uvicorn.
     """
     state = _State()
     state.workdir = Path(workdir).resolve() if workdir else Path.cwd().resolve()
@@ -151,7 +156,7 @@ def create_app(workdir: str | Path | None = None) -> FastAPI:
         app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
     def manager_or_503() -> SessionManager:
-        """取管理器；未就绪时返回 503 并说明原因。"""
+        """Return the manager; 503 with the reason when it is not ready."""
         if state.manager is None:
             raise HTTPException(
                 status_code=503,
@@ -159,11 +164,11 @@ def create_app(workdir: str | Path | None = None) -> FastAPI:
             )
         return state.manager
 
-    # ---- 页面与健康 ----
+    # ---- pages and health ----
 
     @app.get("/", response_class=HTMLResponse)
     async def index() -> HTMLResponse:
-        """返回单页前端。"""
+        """Return the single-page frontend."""
         page = STATIC_DIR / "index.html"
         if not page.is_file():
             return HTMLResponse("<h1>前端资源缺失</h1>", status_code=500)
@@ -171,7 +176,7 @@ def create_app(workdir: str | Path | None = None) -> FastAPI:
 
     @app.get("/api/health")
     async def health() -> dict[str, Any]:
-        """服务健康状态。"""
+        """Service health status."""
         manager = state.manager
         return {
             "ok": manager is not None,
@@ -189,13 +194,13 @@ def create_app(workdir: str | Path | None = None) -> FastAPI:
 
     @app.get("/api/models")
     async def list_models() -> dict[str, Any]:
-        """可用模型列表。"""
+        """Available model list."""
         manager = manager_or_503()
         return {"models": manager.models(), "default": manager.default_model}
 
     @app.get("/api/tools")
     async def list_tools() -> dict[str, Any]:
-        """工具目录（供前端展示能力面）。"""
+        """Tool catalogue (so the frontend can show the capability surface)."""
         manager = manager_or_503()
         entries = manager.tools.store.active_paths()
         return {
@@ -210,17 +215,17 @@ def create_app(workdir: str | Path | None = None) -> FastAPI:
             ]
         }
 
-    # ---- 会话 ----
+    # ---- sessions ----
 
     @app.get("/api/sessions")
     async def list_sessions() -> dict[str, Any]:
-        """会话列表。"""
+        """Session list."""
         manager = manager_or_503()
         return {"sessions": [s.snapshot() for s in manager.list()]}
 
     @app.post("/api/sessions", status_code=201)
     async def create_session(body: NewSessionBody | None = None) -> dict[str, Any]:
-        """新建会话。"""
+        """Create a session."""
         manager = manager_or_503()
         payload = body or NewSessionBody()
         try:
@@ -231,13 +236,13 @@ def create_app(workdir: str | Path | None = None) -> FastAPI:
 
     @app.get("/api/sessions/{session_id}")
     async def get_session(session_id: str, include_messages: bool = True) -> dict[str, Any]:
-        """会话详情。"""
+        """Session detail."""
         runner = _require(manager_or_503(), session_id)
         return runner.snapshot(include_messages=include_messages)
 
     @app.patch("/api/sessions/{session_id}")
     async def update_session(session_id: str, body: UpdateSessionBody) -> dict[str, Any]:
-        """修改会话模型。"""
+        """Change the session's model."""
         runner = _require(manager_or_503(), session_id)
         if body.model:
             runner.model = body.model
@@ -246,7 +251,7 @@ def create_app(workdir: str | Path | None = None) -> FastAPI:
 
     @app.delete("/api/sessions/{session_id}")
     async def delete_session(session_id: str) -> dict[str, Any]:
-        """删除会话。"""
+        """Delete a session."""
         ok = manager_or_503().delete(session_id)
         if not ok:
             raise HTTPException(status_code=404, detail="会话不存在")
@@ -254,7 +259,7 @@ def create_app(workdir: str | Path | None = None) -> FastAPI:
 
     @app.get("/api/sessions/{session_id}/messages")
     async def get_messages(session_id: str) -> dict[str, Any]:
-        """会话历史（供上下文面板渲染）。"""
+        """Session history (for the context panel to render)."""
         runner = _require(manager_or_503(), session_id)
         snapshot = runner.snapshot(include_messages=True)
         return {
@@ -266,7 +271,7 @@ def create_app(workdir: str | Path | None = None) -> FastAPI:
 
     @app.post("/api/sessions/{session_id}/messages", status_code=202)
     async def send_message(session_id: str, body: SendMessageBody) -> dict[str, Any]:
-        """发送消息并触发一轮推理。"""
+        """Send a message and trigger one inference turn."""
         runner = _require(manager_or_503(), session_id)
         if body.channel == "control":
             from harness.inbox import InterruptRequest, UserInput
@@ -284,7 +289,7 @@ def create_app(workdir: str | Path | None = None) -> FastAPI:
 
     @app.post("/api/sessions/{session_id}/cancel")
     async def cancel_session(session_id: str) -> dict[str, Any]:
-        """请求中止本轮推理（在下一个安全点生效）。"""
+        """Request abort of this turn (takes effect at the next safe point)."""
         runner = _require(manager_or_503(), session_id)
         runner.cancel()
         return {"cancelling": True}
@@ -293,7 +298,7 @@ def create_app(workdir: str | Path | None = None) -> FastAPI:
 
     @app.get("/api/sessions/{session_id}/events")
     async def stream_events(session_id: str, request: Request) -> StreamingResponse:
-        """SSE 事件流：assistant / tool / route / compress / usage / state / error。"""
+        """SSE event stream: assistant / tool / route / compress / usage / state / error."""
         runner = _require(manager_or_503(), session_id)
         return StreamingResponse(
             _event_stream(runner, request),
@@ -305,7 +310,7 @@ def create_app(workdir: str | Path | None = None) -> FastAPI:
 
 
 def _require(manager: SessionManager, session_id: str) -> SessionRunner:
-    """取会话，不存在时 404。"""
+    """Look up a session; 404 when absent."""
     runner = manager.get(session_id)
     if runner is None:
         raise HTTPException(status_code=404, detail="会话不存在")
@@ -313,9 +318,10 @@ def _require(manager: SessionManager, session_id: str) -> SessionRunner:
 
 
 async def _event_stream(runner: SessionRunner, request: Request) -> AsyncIterator[bytes]:
-    """把会话事件队列转成 SSE 帧。
+    """Convert the session event queue into SSE frames.
 
-    每 15 秒发送一次心跳注释，避免中间代理断开空闲连接。
+    A heartbeat comment is sent every 15 seconds so intermediary proxies do not
+    drop the idle connection.
     """
     loop = asyncio.get_running_loop()
     last_heartbeat = loop.time()
@@ -343,7 +349,7 @@ async def _event_stream(runner: SessionRunner, request: Request) -> AsyncIterato
 
 
 def _poll(runner: SessionRunner, timeout: float) -> Any:
-    """在阻塞队列上等待一条事件（在线程池中执行）。"""
+    """Wait for one event on the blocking queue (runs in a thread pool)."""
     try:
         return runner.events.get(timeout=timeout)
     except queue.Empty:
@@ -353,7 +359,7 @@ def _poll(runner: SessionRunner, timeout: float) -> Any:
 app = create_app()
 
 
-if __name__ == "__main__":  # pragma: no cover - 手动启动入口
+if __name__ == "__main__":  # pragma: no cover - manual startup entry
     import uvicorn
 
     uvicorn.run("apps.server.main:app", host="127.0.0.1", port=8000, reload=False)
