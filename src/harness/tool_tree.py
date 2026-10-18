@@ -92,7 +92,6 @@ DEEP_DESCRIPTION_LIMIT = 80
 #: 等于把「有哪些工具」这个最关键的信息省掉了。实测全展开仅增加约 400 token，
 #: 远低于模型因此反复试探的代价。
 DEFAULT_INDEX_DEPTH = 0
-DEFAULT_L2_LIMIT = 120
 
 #: 合成（abstract）节点的占位描述。
 #:
@@ -536,8 +535,11 @@ class ToolTree:
 
         * 被拒绝的节点不出现（B5）。
         * ``depth`` 表示**展开到第几层**（1 = 只列 L1；``0`` = 不限制）。
-        * 条目总数超过 ``DEFAULT_L2_LIMIT`` 时按描述长度升序保留前若干条。
         * 结果只由树结构与权限决定，同一会话内逐字节一致。
+
+        不设条目上限：工具分组规模有限（几十个工具、三到四层深），
+        完整索引本就在合理 token 预算内。上限定低了反而会让模型看不到
+        部分工具，还得靠提示去追——得不偿失。
         """
         ordered = self.visible_nodes()
         if depth and depth > 0:
@@ -552,18 +554,6 @@ class ToolTree:
             if n.is_leaf or n.depth == 1 or (n.description or "").strip()
         ]
 
-        if len(shown) > DEFAULT_L2_LIMIT:
-            # 保留所有 L1 与有描述的分组，剩余名额按描述长度（短优先）挑选
-            keep = [
-                n for n in shown if n.depth == 1 or not n.is_leaf
-            ]
-            rest = sorted(
-                (n for n in shown if n.depth > 1 and n.is_leaf),
-                key=lambda n: (len(n.description), n.path),
-            )
-            budget = max(DEFAULT_L2_LIMIT - len(keep), 0)
-            shown = sorted(keep + rest[:budget], key=lambda n: n.path)
-
         lines = []
         for node in shown:
             description = (node.description or "").strip()
@@ -573,34 +563,11 @@ class ToolTree:
             else:
                 lines.append(node.path)
 
-        # 折叠掉的叶子不能凭空消失——否则模型永远不知道它们存在，也没法
-        # tree_query 出来。按所属分组聚合提示，但只列前几个，避免提示本身
-        # 变成新的噪音（工具数多时分组可能上百）。
-        #
-        # 注意：深度限制与折叠可能同时发生，两者都是「去上级路径找」，
-        # 所以合并成一条提示，不重复表达同一件事。
-        shown_set = {n.path for n in shown}
-        folded = [n for n in ordered if n.is_leaf and n.path not in shown_set]
+        # 仅因深度限制而看不到的节点——告诉模型去上级路径展开
         depth_hidden = [
             n for n in ordered if depth and depth > 0 and n.depth > depth
         ]
-
-        if folded:
-            buckets: dict[str, int] = {}
-            for node in folded:
-                parent = node.path.rsplit("/", 1)[0] or "/"
-                buckets[parent] = buckets.get(parent, 0) + 1
-            listed = sorted(buckets.items())[:5]
-            detail = "、".join(
-                f"{path}" + (f"（{count} 个）" if count > 1 else "")
-                for path, count in listed
-            )
-            if len(buckets) > len(listed):
-                detail += f" 等 {len(buckets)} 个位置"
-            lines.append(
-                f"（另有 {len(folded)} 个工具未展开，可用 tree_query 展开：{detail}）"
-            )
-        elif depth_hidden:
+        if depth_hidden:
             lines.append(
                 f"（另有 {len(depth_hidden)} 个更深节点，用 tree_query 按上级路径展开）"
             )

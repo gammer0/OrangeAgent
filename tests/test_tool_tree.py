@@ -450,8 +450,8 @@ class TestTreeIndex:
         # 深层路径不能作为独立条目出现（提示行里提到它们是允许的）
         assert "/skill/mmd" not in index_text_to_paths(text)
 
-    def test_index_merges_depth_and_fold_hints(self, store: FlatStore, perms) -> None:
-        """深度限制与折叠不能各出一行提示（重复表达同一件事）。"""
+    def test_index_merges_depth_hint_into_single_line(self, store: FlatStore, perms) -> None:
+        """深度限制只产生一行提示，不重复表达。"""
         tree = build_tree(store, perms)
         text = tree.tree_index(depth=1)
         hints = [line for line in text.splitlines() if line.startswith("（")]
@@ -493,22 +493,26 @@ class TestTreeIndex:
         tree = build_tree(store, perms)
         assert tree.tree_index() == tree.tree_index()
 
-    def test_index_caps_entries_by_description_length_B6(self) -> None:
-        """超过折叠阈值时保留描述最短的若干条（防止工具数上百时膨胀）。"""
-        from harness.tool_tree import DEFAULT_L2_LIMIT, index_text_to_paths
+    def test_index_has_no_entry_cap(self) -> None:
+        """索引不设条目上限：工具规模有限，全列出来比藏起来好。
 
-        total = DEFAULT_L2_LIMIT + 20
+        曾经有过「超 120 条按描述长度砍」的折叠逻辑，但 140 个工具时
+        会漏掉 21 个，模型永远不知道它们存在。分组规模本身不会那么大，
+        与其加一层极易出错的折叠，不如不设上限。
+        """
+        from harness.tool_tree import index_text_to_paths
+
+        total = 200
         entries = [
-            _def(f"t{i:03d}", f"/tool/g{i:03d}", description="x" * (i + 1))
+            _def(f"t{i:03d}", f"/tool/g{i:03d}", description="x" * (i % 20 + 1))
             for i in range(total)
         ]
         tree = build_tree(FlatStore(entries), AgentPermissions(agent_id="a"))
 
         paths = index_text_to_paths(tree.tree_index())
-        l2 = [p for p in paths if p.count("/") == 2]
-        # L1 占 1 个名额，剩余名额给最短描述
-        assert len(l2) == DEFAULT_L2_LIMIT - 1
-        assert l2 == sorted(f"/tool/g{i:03d}" for i in range(DEFAULT_L2_LIMIT - 1))
+        leaves = [p for p in paths if p.count("/") == 2]
+        assert len(leaves) == total
+        assert leaves == sorted(f"/tool/g{i:03d}" for i in range(total))
 
 
 # ---------------------------------------------------------------------------
