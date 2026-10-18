@@ -81,6 +81,10 @@ class TestAssemblerIntegration:
         calls = [ToolCall(id="c1", name="/a/b", arguments="{}")]
         model = ScriptedModel([AssistantMsg(tool_calls=calls)] * 3)
         assembler = ContextAssembler(capacity=10)  # 极小容量 → 立即 session_end
+        # 新语义下，压缩水位有剩余时会先给压缩机会；这里显式耗尽，
+        # 以便单独验证 session_end 能正确置停。
+        assembler.watermark.mark_compressed(50)
+        assembler.watermark.mark_compressed(75)
         loop = _loop(model=model, assembler=assembler)
         result = loop.run()
 

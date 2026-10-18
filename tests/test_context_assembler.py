@@ -110,13 +110,28 @@ class TestAssembleWatermark:
         assert result.messages == msgs
 
     def test_session_end_does_not_compress_I5(self) -> None:
+        # 两个压缩水位均已用过 → 才能进入收尾
         assembler = ContextAssembler(capacity=100, summarizer=lambda text: "摘要")
+        assembler.watermark.mark_compressed(50)
+        assembler.watermark.mark_compressed(75)
         msgs = self._history(10)  # 远超 85%
         result = assembler.assemble(msgs)
 
         assert result.action == "session_end"
         assert not result.compressed
         assert len(result.messages) == len(msgs)
+
+    def test_high_water_yields_to_pending_compress(self) -> None:
+        """≥85% 但水位仍可用时，先压缩而不是直接收尾。
+
+        实测单步可从 40% 跳到 90%；若收尾优先，压缩永远不触发。
+        """
+        assembler = ContextAssembler(capacity=100, summarizer=lambda text: "摘要")
+        msgs = self._history(10)
+        result = assembler.assemble(msgs)
+
+        assert result.action in {"compress_1", "compress_2"}
+        assert result.compressed
 
     def test_without_summarizer_degrades_losslessly_I4(self) -> None:
         assembler = ContextAssembler(capacity=100, summarizer=None)

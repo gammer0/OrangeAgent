@@ -187,16 +187,21 @@ def judge(
 
 
 def _decide(ratio: float, watermark: Watermark | None) -> JudgeResult:
-    """按 I5 顺序判定：session_end → 0.75 → 0.50。"""
-    if ratio >= SESSION_END:
-        # ≥85% 只收尾，不压缩；未压缩的水位也不会被标记
-        return JudgeResult(action="session_end", ratio=ratio)
+    """按 I5 顺序判定：0.75 → 0.50 → session_end。
 
+    ponytail: 收尾判定必须放在**最后**。若放在最前，单步从 <50% 直接
+    冲过 85% 时会一口气吃掉两个压缩机会，压缩永远不触发。
+    有水位的未压缩记录时，先给压缩机会；压完自然回落，再由下一轮判收尾。
+    """
     if ratio >= AUTO_2 and not _already(watermark, AUTO_2):
         return JudgeResult(action="compress_2", ratio=ratio)
 
     if ratio >= AUTO_1 and not _already(watermark, AUTO_1):
         return JudgeResult(action="compress_1", ratio=ratio)
+
+    if ratio >= SESSION_END:
+        # ≥85% 且已无可用压缩水位 → 收尾，不压缩
+        return JudgeResult(action="session_end", ratio=ratio)
 
     return JudgeResult(action="normal", ratio=ratio)
 

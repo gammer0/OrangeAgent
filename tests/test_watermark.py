@@ -90,15 +90,27 @@ class TestJudgeThresholds:
         assert result.action == "compress_2"
 
     def test_exactly_session_end_triggers_session_end(self) -> None:
-        result = judge([], CAPACITY, estimate=int(CAPACITY * SESSION_END))
+        # 无 watermark（无状态判定）时没有"压缩已用过"的记录，
+        # 按新顺序会先给压缩机会；要观测到收尾，需要传入已耗尽的水位记录。
+        wm = Watermark(capacity=CAPACITY)
+        wm.mark_compressed(50)
+        wm.mark_compressed(75)
+        result = judge([], CAPACITY, watermark=wm, estimate=int(CAPACITY * SESSION_END))
         assert result.action == "session_end"
         assert result.level is None
 
-    def test_session_end_takes_priority_over_compress(self) -> None:
+    def test_session_end_yields_to_pending_compress(self) -> None:
+        """≥85% 时若压缩水位尚有剩余，先压缩；水位耗尽后才收尾。
+
+        ponytail: 旧语义是"收尾优先、不压缩"，但它假设水位渐进爬升。
+        实测单步可从 40% 跳到 90%，旧语义会让压缩永远不触发。
+        """
         wm = Watermark(capacity=CAPACITY)
+        assert judge([], CAPACITY, watermark=wm, estimate=9000).action == "compress_2"
+        wm.mark_compressed(75)
+        assert judge([], CAPACITY, watermark=wm, estimate=9000).action == "compress_1"
+        wm.mark_compressed(50)
         assert judge([], CAPACITY, watermark=wm, estimate=9000).action == "session_end"
-        # 收尾不消耗任何压缩水位
-        assert wm.compressed_at == set()
 
 
 class TestEachLevelOnceOnly:
@@ -154,7 +166,13 @@ class TestEachLevelOnceOnly:
 class TestJudgeWithMessages:
     def test_estimate_from_messages(self) -> None:
         messages = [SystemMsg(content="s" * 2 * CAPACITY)]
-        assert judge(messages, CAPACITY).action == "session_end"
+        # 远超 85%：先给压缩机会；水位耗尽后才收尾
+        wm = Watermark(capacity=CAPACITY)
+        assert judge(messages, CAPACITY, watermark=wm).action == "compress_2"
+        wm.mark_compressed(75)
+        assert judge(messages, CAPACITY, watermark=wm).action == "compress_1"
+        wm.mark_compressed(50)
+        assert judge(messages, CAPACITY, watermark=wm).action == "session_end"
 
     def test_invalid_capacity_raises(self) -> None:
         with pytest.raises(ValueError):

@@ -261,29 +261,118 @@ class SessionRunner:
 
     # ------------------------------------------------------------ 摘要
 
-    #: 摘要请求的输入上限（字符）。超出时先本地截断，避免摘要调用本身超限。
+    #: 摘要请求的输入上限（字符）。超出时按消息类型分块压缩，见 :meth:`_summarize`。
     SUMMARY_INPUT_CHARS = 24_000
 
-    def _summarize(self, text: str) -> str:
-        """无上下文单轮摘要：把一段被压缩的历史折叠成要点。
+    #: 压缩规则（系统侧规定，模型不得自由发挥）。
+    SUMMARY_SYSTEM_PROMPT = """\
+你是上下文压缩器。输入是一段带类型标记的对话历史，你必须按**每种标记**的专属规则压缩，
+不能把所有内容一视同仁地"总结成要点"。
 
-        与主循环共享 ``proxy``，但用独立 ``session_id`` 后缀，避免污染主会话
-        的用量归集；**不传 tools**，模型只能回文本，不会再次触发工具调用。
+## 各类型标记的处理规则
+
+[user] 用户指令
+- **逐条保留**原始意图，不得改写措辞。若有多条，按时间顺序合并成编号列表。
+- 用户给的约束、路径、命名、禁止项，逐字保留。
+
+[assistant:call <工具路径>] 模型发起的工具调用
+- 只保留最终有效的调用及其意图（例："写 textstat/core.py"）。
+- 同一路径被反复调用的，合并成一条并注明次数（例："read main.py ×3"）。
+- 参数内容一律丢弃，除非参数里包含用户要求的字面量（如文件名、常量值）。
+
+[tool:<工具路径>] 工具执行结果
+- **只保留结论，不保留原文**：
+  - 写文件类：`已写入 <路径>（N 字符）`
+  - 读文件类：`读取 <路径>（M 行）`，仅在后续有依赖时才提及其中的关键符号名
+  - 执行/测试类：`退出码 N` + 一行关键输出；失败时必须保留错误类型与出错位置
+  - 列表/查询类：只保留条目数量与最相关的 3 条
+- 被截断的结果（含"字符已省略"）标注为 `（原输出已截断）`。
+- 严禁复述大段代码、JSON、日志。
+
+[assistant] 无工具调用的模型文本
+- 只保留其中的**决定**与**对用户的承诺**；过程性描述、自我解释、寒暄全删。
+
+## 输出格式（严格遵守）
+
+```
+## 目标
+<一句话，来自 [user]>
+
+## 已完成
+- <动作> → <产物路径 / 结果>
+（按时间顺序，每条一行，不写细节）
+
+## 关键决定
+- <决定> — <一句话理由>
+
+## 待处理
+- <未完成事项或已知问题>
+
+## 环境坑
+- <踩过的错误与正确做法>
+（没有则写"无"）
+```
+
+## 硬约束
+- 只输出上述五个小节，不要额外解释、不要复述规则。
+- 总长度不超过输入字符数的 15%。
+- 信息不足的小节写"无"，不要编造。
+"""
+
+    def _summarize(self, text: str) -> str:
+        """无上下文单轮摘要：按系统规定的类型规则折叠历史。
+
+        分块策略：输入超过 :attr:`SUMMARY_INPUT_CHARS` 时切成等长块，
+        每块单独压缩，最后再把各块摘要合并一次。
+        **不丢弃任何内容**——直接截断会静默丢失历史，这是压缩最不可接受的失败方式。
+
+        与主循环共享 ``proxy``，但用独立 ``session_id`` 后缀，避免污染主会话的
+        用量归集；**不传 tools**，模型只能回文本，不会再次触发工具调用。
         """
         from harness.message import SystemMsg, UserMsg
 
-        payload = text[: self.SUMMARY_INPUT_CHARS]
+        # ponytail: 分块预算要扣掉头部标记的长度（如"[这是第 1/3 段...]"），
+        # 否则拼接后会略超 SUMMARY_INPUT_CHARS。
+        budget = self.SUMMARY_INPUT_CHARS - 80
+        chunks = [
+            text[start : start + budget] for start in range(0, len(text), budget)
+        ] or [text]
+
+        if len(chunks) == 1:
+            return self._summarize_once(chunks[0])
+
+        # 多块：逐块压缩，再把各块摘要合并（合并输入通常远小于原文）
+        partials = [
+            self._summarize_once(chunk, index=i + 1, total=len(chunks))
+            for i, chunk in enumerate(chunks)
+        ]
+        merged = "\n\n".join(partials)
+        # 合并阶段也不硬截断：如果仍然超限，递归复用同一策略
+        if len(merged) > self.SUMMARY_INPUT_CHARS:
+            return self._summarize(merged)
+        return self._summarize_once(merged, index=1, total=1, merge=True)
+
+    def _summarize_once(
+        self,
+        text: str,
+        *,
+        index: int = 1,
+        total: int = 1,
+        merge: bool = False,
+    ) -> str:
+        """执行单次摘要调用。"""
+        from harness.message import SystemMsg, UserMsg
+
+        header = ""
+        if total > 1 and not merge:
+            header = f"[这是第 {index}/{total} 段，请只压缩本段内容]\n\n"
+        elif merge:
+            header = "[以下是同一段历史的多份分段摘要，请合并去重为一份]\n\n"
+
         response = self.proxy.chat(
             [
-                SystemMsg(
-                    content=(
-                        "你是上下文压缩器。把给定对话历史压缩成可继续工作的要点。"
-                        "保留：已完成的改动、文件路径、关键决定、未完成事项、踩过的坑。"
-                        "丢弃：重复的工具输出、被截断的大段代码、寒暄。"
-                        "只输出要点列表，不要解释你在做什么。"
-                    )
-                ),
-                UserMsg(content=payload),
+                SystemMsg(content=self.SUMMARY_SYSTEM_PROMPT),
+                UserMsg(content=header + text),
             ],
             session_id=f"{self.session_id}:summary",
             model=self.model,
