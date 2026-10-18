@@ -1,0 +1,19 @@
+{
+  "agents": {
+    "local": {
+      "grants": {
+        "/tool/net/http/post": false,
+        "/tool/os/file/append": false,
+        "/tool/os/file/write": false
+      }
+    },
+    "web": {
+      "grants": {
+        "/tool/net/http/post": false,
+        "/tool/os/file/append": false,
+        "/tool/os/file/write": false
+      }
+    }
+  },
+  "version": 1
+}

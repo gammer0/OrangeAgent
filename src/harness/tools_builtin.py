@@ -139,6 +139,102 @@ def os_echo(text: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# 网络类
+# ---------------------------------------------------------------------------
+
+#: 网络工具默认超时（秒）。比执行类短：HTTP 卡住比命令卡住更常见。
+HTTP_TIMEOUT_S = 15
+
+#: 允许的 URL scheme。只支持 http/https，避免 file:// 等意外协议。
+_ALLOWED_SCHEMES = ("http://", "https://")
+
+
+def _check_url(url: str) -> str:
+    """校验 URL 协议，越界抛 ``ValueError``。"""
+    text = (url or "").strip()
+    if not text:
+        raise ValueError("URL 不能为空")
+    if not text.lower().startswith(_ALLOWED_SCHEMES):
+        raise ValueError(f"只支持 http/https: {url}")
+    return text
+
+
+def net_get(url: str, timeout: int = HTTP_TIMEOUT_S) -> str:
+    """GET 一个 URL，返回状态码、内容类型与响应体（截断）。"""
+    import httpx
+
+    target = _check_url(url)
+    limit = max(1, min(int(timeout), 60))
+    try:
+        response = httpx.get(target, timeout=limit, follow_redirects=True)
+    except httpx.TimeoutException as exc:
+        raise TimeoutError(f"请求超时（{limit}s）: {target}") from exc
+    except httpx.HTTPError as exc:
+        raise ConnectionError(f"请求失败: {type(exc).__name__}: {exc}") from exc
+
+    body = response.text
+    head = (
+        f"状态 {response.status_code} {response.reason_phrase}\n"
+        f"类型 {response.headers.get('content-type', '未知')}\n"
+        f"长度 {len(body)} 字符\n"
+        f"---\n"
+    )
+    return _clip(head + body)
+
+
+def net_post(
+    url: str,
+    body: str = "",
+    content_type: str = "application/json",
+    timeout: int = HTTP_TIMEOUT_S,
+) -> str:
+    """POST 一个 URL，``body`` 原样发送，返回状态码与响应体（截断）。"""
+    import httpx
+
+    target = _check_url(url)
+    limit = max(1, min(int(timeout), 60))
+    headers = {"Content-Type": content_type or "application/json"}
+    try:
+        response = httpx.post(
+            target, content=body.encode("utf-8"), headers=headers, timeout=limit,
+            follow_redirects=True,
+        )
+    except httpx.TimeoutException as exc:
+        raise TimeoutError(f"请求超时（{limit}s）: {target}") from exc
+    except httpx.HTTPError as exc:
+        raise ConnectionError(f"请求失败: {type(exc).__name__}: {exc}") from exc
+
+    text = response.text
+    head = (
+        f"状态 {response.status_code} {response.reason_phrase}\n"
+        f"类型 {response.headers.get('content-type', '未知')}\n"
+        f"长度 {len(text)} 字符\n"
+        f"---\n"
+    )
+    return _clip(head + text)
+
+
+def net_head(url: str, timeout: int = HTTP_TIMEOUT_S) -> str:
+    """HEAD 一个 URL，只返回状态与响应头（用于探测可用性，不下载正文）。"""
+    import httpx
+
+    target = _check_url(url)
+    limit = max(1, min(int(timeout), 60))
+    try:
+        response = httpx.head(target, timeout=limit, follow_redirects=True)
+    except httpx.TimeoutException as exc:
+        raise TimeoutError(f"请求超时（{limit}s）: {target}") from exc
+    except httpx.HTTPError as exc:
+        raise ConnectionError(f"请求失败: {type(exc).__name__}: {exc}") from exc
+
+    lines = [
+        f"状态 {response.status_code} {response.reason_phrase}",
+        *[f"{key}: {value}" for key, value in sorted(response.headers.items())],
+    ]
+    return _clip("\n".join(lines))
+
+
+# ---------------------------------------------------------------------------
 # 执行类
 # ---------------------------------------------------------------------------
 
@@ -460,6 +556,18 @@ TOOL_SPECS: dict[str, dict[str, Any]] = {
               {"path": _STR}, ["path"], ["read"], True),
         _spec("/mcp/fs/write", mcp_fs_write, "MCP filesystem：写入文本文件",
               {"path": _STR, "content": _STR}, ["path", "content"], ["write"]),
+        # ---- 网络访问（caps=net，与文件/执行能力互不重叠）----
+        _spec("/tool/net/http/get", net_get, "HTTP GET，返回状态/类型/正文（截断）",
+              {"url": _STR, "timeout": {"type": "integer", "default": HTTP_TIMEOUT_S}},
+              ["url"], ["net"], True, "global"),
+        _spec("/tool/net/http/post", net_post, "HTTP POST，原样发送 body",
+              {"url": _STR, "body": {"type": "string", "default": ""},
+               "content_type": {"type": "string", "default": "application/json"},
+               "timeout": {"type": "integer", "default": HTTP_TIMEOUT_S}},
+              ["url"], ["net"], False, "global"),
+        _spec("/tool/net/http/head", net_head, "HTTP HEAD，只取状态与响应头",
+              {"url": _STR, "timeout": {"type": "integer", "default": HTTP_TIMEOUT_S}},
+              ["url"], ["net"], True, "global"),
     ]
 }
 

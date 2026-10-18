@@ -4,198 +4,83 @@
   "groups": [],
   "tools": [
     {
-      "path": "/mcp/fs/list",
-      "description": "MCP filesystem：列出目录（URI 语义）",
+      "path": "/tool/net/http/get",
+      "description": "HTTP GET，返回状态/类型/正文（截断）",
       "caps": [
-        "read"
+        "net"
       ],
       "idempotent": true,
-      "builtin": "fs/list",
+      "builtin": "net/http/get",
       "schema": {
         "type": "object",
         "properties": {
-          "path": {
-            "type": "string",
-            "default": "."
-          }
-        },
-        "required": []
-      }
-    },
-    {
-      "path": "/mcp/fs/read",
-      "description": "MCP filesystem：读取文本文件",
-      "caps": [
-        "read"
-      ],
-      "idempotent": true,
-      "builtin": "fs/read",
-      "schema": {
-        "type": "object",
-        "properties": {
-          "path": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "path"
-        ]
-      }
-    },
-    {
-      "path": "/mcp/fs/write",
-      "description": "MCP filesystem：写入文本文件",
-      "caps": [
-        "write"
-      ],
-      "idempotent": false,
-      "builtin": "fs/write",
-      "schema": {
-        "type": "object",
-        "properties": {
-          "path": {
-            "type": "string"
-          },
-          "content": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "path",
-          "content"
-        ]
-      }
-    },
-    {
-      "path": "/tool/code/py/check",
-      "description": "Python 语法检查，返回错误行号",
-      "caps": [
-        "read"
-      ],
-      "idempotent": true,
-      "builtin": "code/py/check",
-      "schema": {
-        "type": "object",
-        "properties": {
-          "path": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "path"
-        ]
-      }
-    },
-    {
-      "path": "/tool/code/py/run_brief",
-      "description": "短时运行脚本并返回输出（带超时）",
-      "caps": [
-        "exec"
-      ],
-      "idempotent": false,
-      "builtin": "code/py/run_brief",
-      "schema": {
-        "type": "object",
-        "properties": {
-          "path": {
+          "url": {
             "type": "string"
           },
           "timeout": {
             "type": "integer",
-            "default": 20
+            "default": 15
           }
         },
         "required": [
-          "path"
+          "url"
         ]
       }
     },
     {
-      "path": "/tool/fluid/check",
-      "description": "流体仿真结构验收：文件/API/不依赖 pygame",
+      "path": "/tool/net/http/head",
+      "description": "HTTP HEAD，只取状态与响应头",
       "caps": [
-        "read"
+        "net"
       ],
       "idempotent": true,
-      "builtin": "fluid/check",
+      "builtin": "net/http/head",
       "schema": {
         "type": "object",
         "properties": {
-          "path": {
-            "type": "string",
-            "default": "fluid"
+          "url": {
+            "type": "string"
+          },
+          "timeout": {
+            "type": "integer",
+            "default": 15
           }
         },
-        "required": []
+        "required": [
+          "url"
+        ]
       }
     },
     {
-      "path": "/tool/fluid/probe",
-      "description": "流体物理验收：跑 N 步查守恒/边界/静置",
+      "path": "/tool/net/http/post",
+      "description": "HTTP POST，原样发送 body",
       "caps": [
-        "exec"
+        "net"
       ],
       "idempotent": false,
-      "builtin": "fluid/probe",
+      "builtin": "net/http/post",
       "schema": {
         "type": "object",
         "properties": {
-          "path": {
-            "type": "string",
-            "default": "fluid"
+          "url": {
+            "type": "string"
           },
-          "steps": {
+          "body": {
+            "type": "string",
+            "default": ""
+          },
+          "content_type": {
+            "type": "string",
+            "default": "application/json"
+          },
+          "timeout": {
             "type": "integer",
-            "default": 500
+            "default": 15
           }
         },
-        "required": []
-      }
-    },
-    {
-      "path": "/tool/game/snake/check",
-      "description": "贪吃蛇验收：结构/语法/常见缺陷",
-      "caps": [
-        "read"
-      ],
-      "idempotent": true,
-      "builtin": "game/snake/check",
-      "schema": {
-        "type": "object",
-        "properties": {
-          "path": {
-            "type": "string",
-            "default": "snake_game"
-          }
-        },
-        "required": []
-      }
-    },
-    {
-      "path": "/tool/game/snake/demo",
-      "description": "贪吃蛇无头自检：固定种子跑若干步",
-      "caps": [
-        "exec"
-      ],
-      "idempotent": false,
-      "builtin": "game/snake/demo",
-      "schema": {
-        "type": "object",
-        "properties": {
-          "path": {
-            "type": "string",
-            "default": "snake_game"
-          },
-          "steps": {
-            "type": "integer",
-            "default": 200
-          },
-          "seed": {
-            "type": "integer",
-            "default": 7
-          }
-        },
-        "required": []
+        "required": [
+          "url"
+        ]
       }
     },
     {
@@ -294,30 +179,6 @@
         "required": [
           "path",
           "content"
-        ]
-      }
-    },
-    {
-      "path": "/tool/os/shell/run",
-      "description": "在子进程中执行一条命令（带超时）",
-      "caps": [
-        "exec"
-      ],
-      "idempotent": false,
-      "builtin": "os/shell/run",
-      "schema": {
-        "type": "object",
-        "properties": {
-          "command": {
-            "type": "string"
-          },
-          "timeout": {
-            "type": "integer",
-            "default": 20
-          }
-        },
-        "required": [
-          "command"
         ]
       }
     }
