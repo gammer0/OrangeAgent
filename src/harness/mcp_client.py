@@ -19,11 +19,12 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
+import shutil
 import subprocess
-import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -111,6 +112,39 @@ def load_mcp_servers(workdir: str | Path) -> dict[str, McpServerConfig]:
     return servers
 
 
+def _resolve_command(command: str) -> list[str]:
+    """解析启动命令，兼容 Windows 的 ``.cmd`` / ``.bat`` 包装脚本。
+
+    Windows 上 npm 系工具（``npx``、``uvx`` 等）不是可执行文件，而是
+    ``npx.cmd``。``subprocess`` 直接传 ``"npx"`` 会抛 ``FileNotFoundError``，
+    必须显式找到 ``.cmd`` 并透过 ``cmd.exe /c`` 启动（否则 CreateProcess
+    也不接受 .cmd）。
+
+    POSIX 上原样返回，交给系统 ``exec``。
+
+    Returns:
+        可直接传给 ``subprocess.Popen`` 的参数列表。
+    """
+    if os.name != "nt":
+        return [command]
+
+    # 已经带扩展名（如 python.exe）或本身就是路径 → 直接用
+    suffix = Path(command).suffix.lower()
+    if suffix in {".exe", ".cmd", ".bat", ".com"}:
+        return [command]
+
+    found = shutil.which(command) or shutil.which(f"{command}.cmd") or shutil.which(
+        f"{command}.bat"
+    )
+    if not found:
+        return [command]  # 交给 Popen 抛 FileNotFoundError，由上层翻译成 McpError
+
+    if found.lower().endswith((".cmd", ".bat")):
+        # .cmd/.bat 必须经 cmd.exe 解释；/c 表示执行后退出
+        return ["cmd.exe", "/c", found]
+    return [found]
+
+
 def _spawn(config: McpServerConfig, workdir: str) -> subprocess.Popen[str]:
     """拉起 MCP 服务器子进程，stdin/stdout 走管道，stderr 收集用于诊断。"""
     env = dict(os.environ)
@@ -118,9 +152,10 @@ def _spawn(config: McpServerConfig, workdir: str) -> subprocess.Popen[str]:
     env.setdefault("PYTHONIOENCODING", "utf-8")
     env.setdefault("PYTHONUTF8", "1")
     cwd = config.cwd or workdir
+    argv = [*_resolve_command(config.command), *config.args]
     try:
         return subprocess.Popen(
-            [config.command, *config.args],
+            argv,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -135,6 +170,7 @@ def _spawn(config: McpServerConfig, workdir: str) -> subprocess.Popen[str]:
         raise McpError(
             f"找不到 MCP 服务命令 {config.command!r}；"
             "请确认它已安装且在 PATH 中"
+            + ("（Windows 上 npm 工具请确保 npx.cmd 存在）" if os.name == "nt" else "")
         ) from exc
 
 
@@ -273,26 +309,20 @@ def call_tool(
 
 def _shutdown(proc: subprocess.Popen[str]) -> None:
     """关闭子进程：先关 stdin，再等短暂超时，最后强杀。"""
-    try:
-        if proc.stdin:
+    if proc.stdin:
+        with contextlib.suppress(Exception):
             proc.stdin.close()
-    except Exception:  # noqa: BLE001 - 关闭失败不影响结果
-        pass
     try:
         proc.wait(timeout=5)
     except Exception:  # noqa: BLE001 - 超时则终止
         proc.kill()
-        try:
+        with contextlib.suppress(Exception):
             proc.wait(timeout=5)
-        except Exception:  # noqa: BLE001
-            pass
     finally:
         for stream in (proc.stdout, proc.stderr):
-            try:
-                if stream:
+            if stream:
+                with contextlib.suppress(Exception):
                     stream.close()
-            except Exception:  # noqa: BLE001
-                pass
 
 
 def stderr_tail(proc: subprocess.Popen[str], limit: int = 2000) -> str:

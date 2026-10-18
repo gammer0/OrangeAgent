@@ -160,3 +160,52 @@ class TestBadServer:
         )
         assert code == 2
         assert load_manifest(workdir).mcp_servers == []
+
+
+class TestCommandResolution:
+    """Windows 上 npm 工具是 .cmd 包装脚本，直接传名字会 FileNotFoundError。"""
+
+    def test_posix_passes_through(self, monkeypatch) -> None:
+        from harness import mcp_client
+
+        monkeypatch.setattr(mcp_client.os, "name", "posix")
+        assert mcp_client._resolve_command("npx") == ["npx"]
+
+    def test_windows_cmd_wrapped_via_cmd_exe(self, monkeypatch, tmp_path) -> None:
+        from harness import mcp_client
+
+        fake = tmp_path / "npx.cmd"
+        fake.write_text("@echo off\n", encoding="utf-8")
+
+        monkeypatch.setattr(mcp_client.os, "name", "nt")
+        monkeypatch.setattr(mcp_client.shutil, "which", lambda name: str(fake))
+
+        assert mcp_client._resolve_command("npx") == ["cmd.exe", "/c", str(fake)]
+
+    def test_windows_exe_used_directly(self, monkeypatch, tmp_path) -> None:
+        from harness import mcp_client
+
+        fake = tmp_path / "python.exe"
+        fake.write_text("", encoding="utf-8")
+
+        monkeypatch.setattr(mcp_client.os, "name", "nt")
+        monkeypatch.setattr(mcp_client.shutil, "which", lambda name: str(fake))
+
+        assert mcp_client._resolve_command("python") == [str(fake)]
+
+    def test_windows_already_has_suffix(self, monkeypatch) -> None:
+        from harness import mcp_client
+
+        monkeypatch.setattr(mcp_client.os, "name", "nt")
+        # 带扩展名时不再走 which，原样返回
+        assert mcp_client._resolve_command("tool.exe") == ["tool.exe"]
+
+    def test_windows_missing_command_kept_for_error(self, monkeypatch) -> None:
+        """找不到时原样返回，让 Popen 抛 FileNotFoundError 并翻译成 McpError。"""
+        from harness import mcp_client
+
+        monkeypatch.setattr(mcp_client.os, "name", "nt")
+        monkeypatch.setattr(mcp_client.shutil, "which", lambda name: None)
+
+        assert mcp_client._resolve_command("definitely-missing") == ["definitely-missing"]
+
