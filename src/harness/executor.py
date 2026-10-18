@@ -1,12 +1,15 @@
-"""执行器（Executor）：按 ``BatchPlan`` 执行并回填结果。
+"""Executor: run a ``BatchPlan`` and backfill results.
 
-对应文档：docs/02-数据结构设计/06-执行.md、docs/01-系统架构设计.md §4.6/§4.6.1
+See docs/02-data-structures/06-execution.md and docs/01-architecture.md §4.6/§4.6.1.
 
-边界（明确不做的事）：
+Boundaries (things this module explicitly does not do):
 
-* **不消费 ``Inbox``**：安全点检查由 ``on_group_done`` 回调交给编排层完成；
-* **不实现重试 / 退避**：属于异常层（§4.9），本模块只标注 ``retryable``；
-* **不访问 ``tool_tree``**：工具定义通过 ``resolver`` 依赖注入。
+* **Does not consume ``Inbox``**: safe-point checks are delegated to the
+  orchestration layer via the ``on_group_done`` callback;
+* **Does not retry or back off**: that belongs to the error layer (§4.9); this
+  module only marks ``retryable``;
+* **Does not touch ``tool_tree``**: tool definitions arrive through the
+  ``resolver`` dependency injection.
 """
 
 from __future__ import annotations
@@ -38,13 +41,19 @@ DEFAULT_MAX_WORKERS = 4
 
 @runtime_checkable
 class ExecToolDef(Protocol):
-    """执行所需的工具定义子集（避免本模块硬依赖 tool 层的 ``ToolDef``）。
+    """The subset of a tool definition needed to execute it.
+
+    Kept minimal so this module does not hard-depend on the tool layer's
+    ``ToolDef``.
 
     Attributes:
-        fn: 工具实现，签名 ``fn(**kwargs) -> Any``。
-        concurrency: ``"safe"`` / ``"exclusive"``；不是 ``"safe"`` 一律按 ``exclusive``。
-        idempotent: 是否幂等；**唯一**决定 ``ExecResult.retryable``（§4.13）。
-        schema: 参数 JSON Schema；缺省或空对象等价于「无约束」。
+        fn: Tool implementation with signature ``fn(**kwargs) -> Any``.
+        concurrency: ``"safe"`` / ``"exclusive"``; anything other than
+            ``"safe"`` is treated as ``exclusive``.
+        idempotent: Whether the tool is idempotent; the **only** input to
+            ``ExecResult.retryable`` (§4.13).
+        schema: Argument JSON Schema; absent or an empty object means
+            "no constraints".
     """
 
     fn: Callable[..., Any]
@@ -55,14 +64,15 @@ class ExecToolDef(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class GroupReport:
-    """一次组完成后传给编排层的信息（安全点检查用）。
+    """Information handed to the orchestration layer after a group completes (for safe points).
 
     Attributes:
-        index: 组序号。
-        group: 该组本身。
-        results: 该组已产出的结果，键为 ``tool_call_id``。
-        is_last: 是否为本批最后一组（② 与 ③ 是否重合）。
-        plan: 批次计划，便于回调判断整体进度。
+        index: Group index.
+        group: The group itself.
+        results: Results produced by this group, keyed by ``tool_call_id``.
+        is_last: Whether this is the last group of the batch (i.e. whether ② and
+            ③ coincide).
+        plan: The batch plan, so callbacks can judge overall progress.
     """
 
     index: int
@@ -74,24 +84,30 @@ class GroupReport:
 
 @dataclass(frozen=True, slots=True)
 class Committed:
-    """编排层的安全点结论：因中断已为全部未回填调用补完占位。
+    """The orchestration layer's safe-point verdict: placeholders are already filled.
+
+    Returned when an interrupt has caused every unfilled call to receive a
+    placeholder.
 
     Attributes:
-        reason: 触发中断的 ``InterruptRequest.reason``，原样透传。
+        reason: The ``InterruptRequest.reason`` that triggered the interrupt,
+            passed through verbatim.
     """
 
     reason: str
 
 
 GroupDoneHook = Callable[[GroupReport], Committed | None]
-"""组完成回调；返回 ``Committed`` 表示本组已提交且剩余组应停止执行。"""
+"""Group-completion callback; returning ``Committed`` means this group is already
+committed and the remaining groups must not run."""
 
 
 def _content_of(value: Any, max_chars: int = DEFAULT_MAX_CHARS) -> str:
-    """把工具返回值转成 ``ToolMsg.content`` 所需的字符串（D4）。
+    """Convert a tool return value into the string needed for ``ToolMsg.content`` (D4).
 
-    ponytail: C1 截断在此接入——它是工具结果进入 ``ToolMsg`` 的唯一出口，
-    放这里才能同时覆盖成功与失败两条路径。
+    Note: C1 truncation is wired in here -- this is the single exit through
+    which a tool result becomes a ``ToolMsg``, so placing it here covers both
+    the success and failure paths.
     """
     if not isinstance(value, str):
         try:
@@ -102,7 +118,7 @@ def _content_of(value: Any, max_chars: int = DEFAULT_MAX_CHARS) -> str:
 
 
 def _failed_content(exc: BaseException, max_chars: int = DEFAULT_MAX_CHARS) -> str:
-    """``3c`` 的 ``content``：错误类型 + 消息 + traceback（仍是合法字符串）。"""
+    """``content`` for ``3c``: error type + message + traceback (still a valid string)."""
     detail = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
     return truncate_result(
         error_content("3c", f"{type(exc).__name__}: {exc}\n{detail}"),
@@ -115,33 +131,37 @@ def _run_one(
     resolver: Callable[[ToolCall], ExecToolDef],
     max_chars: int = DEFAULT_MAX_CHARS,
 ) -> ExecResult:
-    """执行单个调用：先校验参数（①–③ 关），再调用实现（④ 关）。
+    """Execute one call: validate arguments first (gates ①-③), then invoke (gate ④).
 
-    参数校验在进 ``fn`` **之前**完成，这很关键：
+    Validating **before** entering ``fn`` matters:
 
-    * 参数错误归 ``3d``（模型可自我修正），而不是执行异常 ``3c``；
-    * ``3d`` 的 content 是结构化 JSON（``stage`` + ``errors[]``），模型能
-      直接看出哪个字段缺了、类型错了；``3c`` 的 traceback 对模型是噪音。
-    * 缺必填字段/类型错不得静默传给 ``fn``——否则工具内部若有默认行为，
-      会产出看似成功但语义错误的结果。
+    * Argument errors map to ``3d`` (the model can self-correct) rather than the
+      execution exception ``3c``;
+    * ``3d`` content is structured JSON (``stage`` + ``errors[]``) so the model
+      sees exactly which field is missing or mistyped; a ``3c`` traceback is
+      noise to the model;
+    * Missing required fields or type errors must never be silently passed to
+      ``fn`` -- otherwise built-in defaults inside the tool could produce a
+      result that looks successful but is semantically wrong.
 
-    ``3d`` 不重试（J4）；只有真正进入 ``fn`` 后的异常才归 ``3c``。
+    ``3d`` is never retried (J4); only exceptions raised inside ``fn`` map to
+    ``3c``.
     """
     started = time.perf_counter()
     tool: ExecToolDef | None = None
     try:
         tool = resolver(call)
 
-        # ①–③ 关：JSON 解析 → schema 校验 → 类型转换与缺省填充
+        # Gates ①-③: JSON parsing -> schema validation -> coercion and default filling
         validation, failure = validate_arguments(
             call.arguments, getattr(tool, "schema", {}) or {}
         )
         if failure is not None:
             elapsed = int((time.perf_counter() - started) * 1000)
             return failure.model_copy(update={"duration_ms": elapsed})
-        assert validation is not None  # 与 failure 互斥
+        assert validation is not None  # mutually exclusive with failure
 
-        # ④ 关：调用实现
+        # Gate ④: invoke the implementation
         value = tool.fn(**validation.params)
         elapsed = int((time.perf_counter() - started) * 1000)
         return ExecResult(
@@ -151,7 +171,7 @@ def _run_one(
             retryable=tool.idempotent,
             duration_ms=elapsed,
         )
-    except BaseException as exc:  # noqa: BLE001 - 工具异常必须被捕获，否则批次留下半截
+    except BaseException as exc:  # noqa: BLE001 - must catch; else the batch is left half-done
         elapsed = int((time.perf_counter() - started) * 1000)
         return ExecResult(
             ok=False,
@@ -168,10 +188,11 @@ def _run_group(
     max_workers: int,
     max_chars: int = DEFAULT_MAX_CHARS,
 ) -> dict[str, ExecResult]:
-    """执行一个组，返回 ``{tool_call_id: ExecResult}``。
+    """Execute one group and return ``{tool_call_id: ExecResult}``.
 
-    ``parallel`` 组用线程池并发；``serial`` 组按组内顺序逐个执行。
-    ``exclusive`` 组按 D6 恒为单元素，串行分支同样兼容多元素。
+    ``parallel`` groups use a thread pool; ``serial`` groups run in intra-group
+    order. Per D6 an ``exclusive`` group always has a single element, but the
+    serial branch tolerates multiple elements too.
     """
     if group.mode == "parallel" and len(group.calls) > 1:
         workers = max(1, min(max_workers, len(group.calls)))
@@ -193,34 +214,37 @@ def execute_batch(
     max_workers: int = DEFAULT_MAX_WORKERS,
     max_chars: int = DEFAULT_MAX_CHARS,
 ) -> dict[str, ExecResult]:
-    """按 ``groups`` 顺序执行整批，并把结果写回 ``plan.results``。
+    """Execute the whole batch in ``groups`` order, writing results back into ``plan.results``.
 
-    结果字典的**插入顺序**严格等于"组序 + 组内序"（D3），与并发完成顺序无关：
-    每个组执行完毕后按组内 ``calls`` 顺序写入。
+    The **insertion order** of the result dict is exactly "group order then
+    intra-group order" (D3), independent of completion order: each group writes
+    its results in intra-group ``calls`` order once it finishes.
 
     Args:
-        plan: 批次计划（分组不可变，仅 ``results`` 被填充）。
-        resolver: ``ToolCall -> ExecToolDef`` 依赖注入。
-        on_group_done: 组完成回调（安全点）。返回 :class:`Committed` 时立即停止
-            后续组；本模块**不自行补占位**，由编排层在回调中调用
-            :func:`harness.execution.fill_placeholders`。
-        max_workers: 并行组的线程数上限，默认 4。
-        max_chars: 单条工具结果的字符上限（C1），默认 4000。
+        plan: Batch plan (grouping is immutable; only ``results`` is filled).
+        resolver: ``ToolCall -> ExecToolDef`` dependency injection.
+        on_group_done: Group-completion callback (safe point). Returning
+            :class:`Committed` stops the remaining groups immediately; this
+            module **does not fill placeholders itself** -- the orchestration
+            layer calls :func:`harness.execution.fill_placeholders` inside the
+            callback.
+        max_workers: Worker cap for parallel groups, default 4.
+        max_chars: Per-result character cap (C1), default 4000.
 
     Returns:
-        与 ``plan.calls`` 一一对应的 ``{tool_call_id: ExecResult}``（D2）。
+        ``{tool_call_id: ExecResult}`` matching ``plan.calls`` one-to-one (D2).
 
     Raises:
-        ValueError: ``max_workers < 1``。
+        ValueError: ``max_workers < 1``.
     """
     if max_workers < 1:
-        raise ValueError("max_workers 必须 >= 1")
+        raise ValueError("max_workers must be >= 1")
 
     total = len(plan.groups)
 
     for position, group in enumerate(plan.groups):
         group_results = _run_group(group, resolver, max_workers, max_chars)
-        # D3：按组内 calls 顺序写入，不按完成顺序
+        # D3: write in intra-group calls order, not completion order
         for call in group.calls:
             plan.record(call.id, group_results[call.id])
 
@@ -237,5 +261,6 @@ def execute_batch(
         if on_group_done(report) is not None:
             break
 
-    # D2：正常情况下 results 键与 calls 一一对应；中断时由编排层补 3e 后闭合。
+    # D2: normally results matches calls one-to-one; on interrupt the
+    # orchestration layer closes the gap by filling 3e placeholders.
     return dict(plan.results)

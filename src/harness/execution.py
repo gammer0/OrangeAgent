@@ -1,22 +1,24 @@
-"""执行层数据模型与批次分组（D 组）。
+"""Execution-layer data models and batch grouping (group D).
 
-对应文档：docs/02-数据结构设计/06-执行.md
+See docs/02-data-structures/06-execution.md.
 
-本模块只负责**数据结构与分组**，不执行任何工具：
+This module handles **data structures and grouping only** and executes no
+tools:
 
-* ``ExecResult``  单次调用结果（D4：失败时 ``content`` 仍为字符串）
-* ``ExecGroup``   子批次，一次可提交的原子单位
-* ``BatchPlan``   本批全部调用 + 分组 + 结果槽
-* ``plan_batch``  分组规则（D1/D5/D6）
-* ``fill_placeholders`` 组间中断时为本批**全部未回填**调用补 ``3e``（D7）
+* ``ExecResult``        result of one call (D4: ``content`` remains a string on failure)
+* ``ExecGroup``         a sub-batch, the atomic unit that can be submitted at once
+* ``BatchPlan``         all calls of this batch + grouping + result slots
+* ``plan_batch``        grouping rules (D1/D5/D6)
+* ``fill_placeholders`` backfill ``3e`` for **every unfilled** call in the batch
+  when an interrupt arrives between groups (D7)
 
-约束归属：
+Constraint ownership:
 
-* D1 → ``plan_batch`` 的 ``mode`` 推导
-* D2 → ``BatchPlan`` 构造期校验
-* D5 → ``plan_batch`` 的拼接自检
-* D6 → ``ExecGroup`` 构造期校验
-* D7 → ``fill_placeholders`` 覆盖范围 + ``retryable=False``
+* D1 -> ``mode`` derivation in ``plan_batch``
+* D2 -> construction-time validation of ``BatchPlan``
+* D5 -> concatenation self-check in ``plan_batch``
+* D6 -> construction-time validation of ``ExecGroup``
+* D7 -> coverage of ``fill_placeholders`` + ``retryable=False``
 """
 
 from __future__ import annotations
@@ -42,21 +44,21 @@ __all__ = [
 ]
 
 ErrorType = Literal["1", "2", "3a", "3b", "3c", "3d", "3e"]
-"""异常编号，见 docs/01-系统架构设计.md §4.9。"""
+"""Error identifiers; see docs/01-architecture.md §4.9."""
 
 ERROR_TYPES: tuple[str, ...] = ("1", "2", "3a", "3b", "3c", "3d", "3e")
 
 Mode = Literal["serial", "parallel"]
 
 ABORT_REASON_ALLOWED: tuple[str, ...] = ("user_abort", "session_end", "timeout")
-"""``InterruptRequest.reason`` 的固定取值（G11）。"""
+"""Fixed set of ``InterruptRequest.reason`` values (G11)."""
 
 
 def _error_payload(error_type: str, message: str) -> str:
-    """构造 ``ok=False`` 时的 ``content``。
+    """Build ``content`` for ``ok=False``.
 
-    D4 要求失败时 ``content`` 仍是合法字符串；这里统一序列化为 JSON 对象，
-    既保证是字符串，也便于模型解析。
+    D4 requires ``content`` to still be a valid string on failure; we serialize
+    a JSON object so it is both a string and easy for the model to parse.
     """
     return json.dumps(
         {"error_type": error_type, "message": message}, ensure_ascii=False
@@ -64,27 +66,27 @@ def _error_payload(error_type: str, message: str) -> str:
 
 
 def error_content(error_type: str, message: str) -> str:
-    """公开的错误 ``content`` 构造器（供执行器 / 参数校验复用）。"""
+    """Public error ``content`` builder (reused by the executor and argument validation)."""
     return _error_payload(error_type, message)
 
 
 def skipped_content(reason: str) -> str:
-    """构造 ``3e`` 占位 ``content``（§6.3 固定值）。"""
+    """Build the ``3e`` placeholder ``content`` (fixed value per §6.3)."""
     return json.dumps(
         {"status": "skipped", "reason": reason}, ensure_ascii=False
     )
 
 
 class ExecResult(BaseModel):
-    """``ExecResult``：单次工具调用的结果。
+    """``ExecResult``: the result of one tool call.
 
     Attributes:
-        ok: 是否成功。
-        content: 已序列化结果；``ok=False`` 时仍是合法字符串（D4）。
-        error_type: 异常编号；成功时为 ``None``。
-        retryable: **只由** ``ToolDef.idempotent`` 决定（§4.13），与 ``concurrency`` 无关；
-            ``3e`` 恒为 ``False``（D7）。
-        duration_ms: 执行耗时，毫秒。
+        ok: Whether the call succeeded.
+        content: Serialized result; still a valid string when ``ok=False`` (D4).
+        error_type: Error identifier; ``None`` on success.
+        retryable: Determined **only** by ``ToolDef.idempotent`` (§4.13) and
+            unrelated to ``concurrency``; always ``False`` for ``3e`` (D7).
+        duration_ms: Execution duration in milliseconds.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -98,23 +100,24 @@ class ExecResult(BaseModel):
     @model_validator(mode="after")
     def _check_consistency(self) -> ExecResult:
         if not isinstance(self.content, str):  # D4
-            raise ValueError("D4: content 必须是字符串")
+            raise ValueError("D4: content must be a string")
         if self.ok and self.error_type is not None:
-            raise ValueError("ok=True 时 error_type 必须为 None")
+            raise ValueError("error_type must be None when ok=True")
         if not self.ok and self.error_type is None:
-            raise ValueError("ok=False 时必须给出 error_type")
+            raise ValueError("error_type is required when ok=False")
         if self.error_type == "3e" and self.retryable:  # D7
-            raise ValueError("D7: error_type == '3e' 时 retryable 必须为 false")
+            raise ValueError("D7: retryable must be false when error_type == '3e'")
         return self
 
 
 class ExecGroup(BaseModel):
-    """``ExecGroup``：一次可提交的原子单位。
+    """``ExecGroup``: the atomic unit that can be submitted at once.
 
     Attributes:
-        index: 在本批中的序号，从 0 起。
-        calls: 组内调用，有序。
-        mode: 组内执行模式；``"parallel"`` 时元素必须全部为 ``safe``（D6）。
+        index: Position within this batch, starting at 0.
+        calls: Calls in the group, ordered.
+        mode: Execution mode within the group; ``"parallel"`` requires every
+            element to be ``safe`` (D6).
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -125,10 +128,11 @@ class ExecGroup(BaseModel):
 
 
 class BatchPlan(BaseModel):
-    """``BatchPlan``：一个批次的完整执行计划。
+    """``BatchPlan``: the complete execution plan for one batch.
 
-    构造后不可变（§6.2：分组一次成型，执行期不可变）；``results`` 由执行器
-    通过 ``record`` 逐项写入，写入顺序不影响回填顺序（D3）。
+    Immutable after construction (§6.2: grouping is formed once and cannot
+    change during execution); ``results`` is written item by item via
+    ``record``, and write order never affects backfill order (D3).
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -140,34 +144,36 @@ class BatchPlan(BaseModel):
 
     @model_validator(mode="after")
     def _check_groups_cover_calls(self) -> BatchPlan:
-        """D5：groups 拼接后与 calls 完全一致（无遗漏、无重复、无重排）。"""
+        """D5: concatenating groups equals calls exactly (no omission, duplicate or reorder)."""
         flattened = [call.id for group in self.groups for call in group.calls]
         expected = [call.id for call in self.calls]
         if flattened != expected:
             raise ValueError(
-                f"D5: groups 拼接与 calls 不一致；groups={flattened} calls={expected}"
+                f"D5: concatenated groups do not match calls; "
+                f"groups={flattened} calls={expected}"
             )
         for position, group in enumerate(self.groups):
             if group.index != position:
                 raise ValueError(
-                    f"group.index 必须与位置一致：位置 {position} 实际 {group.index}"
+                    f"group.index must match its position: "
+                    f"position {position} has {group.index}"
                 )
         return self
 
-    # -- results 是执行期唯一可变的部分（D2 / D3） -----------------------------
+    # -- results is the only mutable part during execution (D2 / D3) -----------
 
     def record(self, call_id: str, result: ExecResult) -> None:
-        """写入一条结果；键必须属于本批 ``calls``（D2）。"""
+        """Record one result; the key must belong to this batch's ``calls`` (D2)."""
         if not any(call.id == call_id for call in self.calls):
-            raise KeyError(f"D2: {call_id!r} 不属于本批调用")
+            raise KeyError(f"D2: {call_id!r} does not belong to this batch")
         self.results[call_id] = result
 
     def is_complete(self) -> bool:
-        """本批是否已全部回填（D2 的完整性判定）。"""
+        """Whether every result has been backfilled (D2 completeness check)."""
         return len(self.results) == len(self.calls)
 
     def ordered_results(self) -> list[tuple[ToolCall, ExecResult]]:
-        """按组序 + 组内序返回 (call, result)，不按完成顺序（D3）。"""
+        """Return (call, result) in group order then intra-group order, not completion order (D3)."""
         ordered: list[tuple[ToolCall, ExecResult]] = []
         for group in self.groups:
             for call in group.calls:
@@ -178,26 +184,28 @@ class BatchPlan(BaseModel):
 
 
 ConcurrencyOf = Callable[[ToolCall], str]
-"""依赖注入：把 ``ToolCall`` 映射到 ``"safe"`` / ``"exclusive"``。"""
+"""Injected mapper from ``ToolCall`` to ``"safe"`` / ``"exclusive"``."""
 
 
 def plan_batch(calls: list[ToolCall], concurrency_of: ConcurrencyOf) -> BatchPlan:
-    """按并发属性把一个批次切成 ``ExecGroup`` 序列（§6.2）。
+    """Split one batch into a sequence of ``ExecGroup`` by concurrency (§6.2).
 
-    规则：
+    Rules:
 
-    * 相邻 ``safe`` 合并为一组 ``parallel``（不跨 ``exclusive``）；
-    * 每个 ``exclusive`` 独占一组 ``serial``；
-    * 只要出现任一 ``exclusive``，``BatchPlan.mode = "serial"``（D1）；
-    * 全 ``safe`` → 单个 ``parallel`` 组；空批次 → 无组、``mode="parallel"``。
+    * Adjacent ``safe`` calls merge into one ``parallel`` group (never spanning
+      an ``exclusive``);
+    * Each ``exclusive`` call occupies its own ``serial`` group;
+    * If any ``exclusive`` appears, ``BatchPlan.mode = "serial"`` (D1);
+    * All ``safe`` -> one ``parallel`` group; empty batch -> no groups,
+      ``mode="parallel"``.
 
     Args:
-        calls: 本批全部调用，顺序即 provider 返回顺序。
-        concurrency_of: 调用 → 并发属性；返回值不是 ``"safe"`` 时按 ``exclusive`` 处理
-            （保守默认，§4.6）。
+        calls: Every call in this batch, in provider-return order.
+        concurrency_of: Call -> concurrency attribute; anything other than
+            ``"safe"`` is treated as ``exclusive`` (conservative default, §4.6).
 
     Returns:
-        不可变的 ``BatchPlan``，满足 D5。
+        An immutable ``BatchPlan`` satisfying D5.
     """
     groups: list[ExecGroup] = []
     pending_safe: list[ToolCall] = []
@@ -230,26 +238,28 @@ def fill_placeholders(
     filled_ids: set[str] | frozenset[str],
     reason: str,
 ) -> list[ToolMsg]:
-    """为**本批全部未回填**调用补 ``3e`` 占位（D7）。
+    """Backfill a ``3e`` placeholder for **every unfilled** call in the batch (D7).
 
-    注意覆盖范围是"未回填"而非"未执行"：已执行但结果尚未回填的调用同样要补，
-    否则下一轮 LLM 会因 ``tool_calls`` 未闭合而 400。返回顺序沿用
-    ``groups`` 顺序 + 组内顺序（D3）。
+    Note the coverage is "unfilled", not "unexecuted": a call that ran but has
+    no result yet must be backfilled too, otherwise the next LLM round fails
+    with 400 because ``tool_calls`` is left open. Output order follows
+    ``groups`` order then intra-group order (D3).
 
     Args:
-        plan: 当前批次的执行计划。
-        filled_ids: 已经有 ``ExecResult`` 的 ``tool_call_id`` 集合。
-        reason: ``InterruptRequest.reason``，原样写入 ``content.reason``，不得写死。
+        plan: The execution plan of the current batch.
+        filled_ids: Set of ``tool_call_id`` values that already have an ``ExecResult``.
+        reason: ``InterruptRequest.reason``, written verbatim into
+            ``content.reason``; must never be hardcoded.
 
     Returns:
-        占位 ``ToolMsg`` 列表，顺序稳定。
+        The placeholder ``ToolMsg`` list, in stable order.
 
     Raises:
-        ValueError: ``reason`` 不在 G11 允许的三个取值内。
+        ValueError: ``reason`` is not one of the three values allowed by G11.
     """
     if reason not in ABORT_REASON_ALLOWED:
         raise ValueError(
-            f"G11: reason 只能取 {ABORT_REASON_ALLOWED}，实际 {reason!r}"
+            f"G11: reason must be one of {ABORT_REASON_ALLOWED}, got {reason!r}"
         )
 
     content = skipped_content(reason)
