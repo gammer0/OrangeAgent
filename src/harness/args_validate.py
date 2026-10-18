@@ -1,20 +1,21 @@
-"""参数校验：四道关卡与 ``3d`` 回填。
+"""Argument validation: four gates and ``3d`` backfill.
 
-对应文档：docs/02-数据结构设计/09-参数校验.md
+See docs/02-data-structures/09-argument-validation.md.
 
-| 关 | 动作 | 归属 |
-|----|------|------|
-| ① | JSON 解析 | 本模块 |
-| ② | Schema 校验（必填 / 类型 / 枚举 / 多余字段忽略） | 本模块 |
-| ③ | 类型转换与缺省填充 | 本模块 |
-| ④ | 调用 ``fn`` | 执行器，失败归 ``3c`` |
+| Gate | Action | Owner |
+|------|--------|-------|
+| ① | JSON parsing | this module |
+| ② | Schema validation (required / type / enum / ignore extras) | this module |
+| ③ | Type coercion and default filling | this module |
+| ④ | Invoke ``fn`` | the executor; failures map to ``3c`` |
 
-约束：
+Constraints:
 
-* J1：``arguments`` 不得被自动修复或补全，只能原样解析；
-* J2：``3d`` 的 ``content`` 必须是合法 JSON，含 ``stage`` 与 ``errors``；
-* J3：多余字段允许忽略，但必须让上层拿到"被忽略的字段"以便写 ``TraceEvent``；
-* J4：``3d`` 不单独计数重试（本模块不含重试逻辑）。
+* J1: ``arguments`` must never be auto-repaired or completed, only parsed as-is;
+* J2: the ``content`` of ``3d`` must be valid JSON containing ``stage`` and ``errors``;
+* J3: extra fields may be ignored, but the upper layer must still receive
+  "which fields were ignored" so it can write a ``TraceEvent``;
+* J4: ``3d`` does not count toward retries (this module contains no retry logic).
 """
 
 from __future__ import annotations
@@ -34,7 +35,8 @@ __all__ = [
     "validate_arguments",
 ]
 
-# JSON Schema 类型名 → 模型可读写法（回填给模型看，用于自我修正）
+# JSON Schema type name -> model-readable spelling (fed back to the model for
+# self-correction)
 _TYPE_ALIASES: dict[str, tuple[str, ...]] = {
     "string": ("string", "str"),
     "integer": ("integer", "int"),
@@ -47,7 +49,7 @@ _TYPE_ALIASES: dict[str, tuple[str, ...]] = {
 
 
 def _json_type_of(value: Any) -> str:
-    """返回 JSON 类型名（``bool`` 必须先于 ``int`` 判断）。"""
+    """Return the JSON type name (``bool`` must be checked before ``int``)."""
     if value is None:
         return "null"
     if isinstance(value, bool):
@@ -66,7 +68,7 @@ def _json_type_of(value: Any) -> str:
 
 
 def _matches_type(value: Any, expected: str) -> bool:
-    """判断 Python 值是否符合 JSON Schema 的 ``type``。"""
+    """Whether a Python value matches a JSON Schema ``type``."""
     if expected == "integer":
         return isinstance(value, int) and not isinstance(value, bool)
     if expected == "number":
@@ -81,19 +83,19 @@ def _matches_type(value: Any, expected: str) -> bool:
         return isinstance(value, dict)
     if expected == "null":
         return value is None
-    return True  # 未知 type 不阻断
+    return True  # an unknown type never blocks
 
 
 @dataclass(frozen=True, slots=True)
 class ArgIssue:
-    """单条可自我修正的参数错误（J2 的 ``errors[]`` 元素）。
+    """One self-correctable argument error (an element of J2's ``errors[]``).
 
     Attributes:
-        field: 出错字段名。
-        kind: ``missing`` / ``type`` / ``enum``。
-        expected: 期望类型（``kind == "type"`` / ``"missing"``）。
-        actual: 实际类型（``kind == "type"``）。
-        allowed: 允许取值（``kind == "enum"``）。
+        field: Name of the offending field.
+        kind: ``missing`` / ``type`` / ``enum``.
+        expected: Expected type (for ``kind == "type"`` / ``"missing"``).
+        actual: Actual type (for ``kind == "type"``).
+        allowed: Allowed values (for ``kind == "enum"``).
     """
 
     field: str
@@ -115,12 +117,14 @@ class ArgIssue:
 
 @dataclass(frozen=True, slots=True)
 class ArgumentValidation:
-    """成功分支的产物。
+    """Product of the success branch.
 
     Attributes:
-        params: 已转换、已填缺省的关键字参数。
-        canonical: 统一为 dict 后的原始参数（未填缺省），用于轨迹记录。
-        ignored: 被忽略的多余字段（J3，上层据此写 ``TraceEvent``）。
+        params: Coerced keyword arguments with defaults filled.
+        canonical: The original arguments normalized to a dict (defaults not
+            filled), for trace records.
+        ignored: Extra fields that were ignored (J3; the upper layer writes a
+            ``TraceEvent`` from this).
     """
 
     params: dict[str, Any]
@@ -129,11 +133,11 @@ class ArgumentValidation:
 
 
 ValidationOutcome = tuple[ArgumentValidation | None, ExecResult | None]
-"""``(成功产物, 3d 失败结果)``，二者恰有一个非 ``None``。"""
+"""``(success product, 3d failure result)``; exactly one is non-``None``."""
 
 
 def _fail(stage: str, errors: list[ArgIssue], **extra: Any) -> ExecResult:
-    """构造 ``3d`` 的 ``ExecResult``（J2：``content`` 为合法 JSON，含 stage/errors）。"""
+    """Build the ``3d`` ``ExecResult`` (J2: ``content`` is valid JSON with stage/errors)."""
     payload: dict[str, Any] = {
         "stage": stage,
         "errors": [issue.to_dict() for issue in errors],
@@ -143,13 +147,13 @@ def _fail(stage: str, errors: list[ArgIssue], **extra: Any) -> ExecResult:
         ok=False,
         content=json.dumps(payload, ensure_ascii=False),
         error_type="3d",
-        retryable=False,  # J4 / §9.3：3d 不自动重试
+        retryable=False,  # J4 / §9.3: 3d is never auto-retried
         duration_ms=0,
     )
 
 
 def _parse_error_stage(raw: str, exc: json.JSONDecodeError) -> ExecResult:
-    """① 关失败：提供原始字符串与错误位置（不回填"修复后"的内容）。"""
+    """Gate ① failure: provide the raw string and error position (never a "repaired" version)."""
     return _fail(
         "parse",
         [ArgIssue(field="<arguments>", kind="parse", expected="json")],
@@ -160,9 +164,10 @@ def _parse_error_stage(raw: str, exc: json.JSONDecodeError) -> ExecResult:
 
 
 def _coerce(value: Any, expected: str) -> tuple[Any, bool]:
-    """③ 关：单值类型转换；返回 ``(转换后值, 是否成功)``。
+    """Gate ③: coerce a single value; returns ``(coerced, succeeded)``.
 
-    只做安全的字面量转换，不做字符串清洗等"自动修复"（J1 精神）。
+    Only safe literal conversions are performed; no string cleanup or other
+    "auto repair" (the spirit of J1).
     """
     if _matches_type(value, expected):
         return value, True
@@ -191,10 +196,11 @@ def _coerce(value: Any, expected: str) -> tuple[Any, bool]:
 
 
 def _defer_to_coerce(value: Any, expected: Any) -> bool:
-    """② 关是否需要把该字段"让给"③ 关（§9.1）。
+    """Whether gate ② should "hand over" this field to gate ③ (§9.1).
 
-    只有**字符串字面量**需要类型转换（``"12"`` → 12、``"true"`` → true）时
-    才延后到 ③ 关；其余类型不符一律在 ② 关报 ``kind="type"``。
+    Only **string literals** that need coercion (``"12"`` -> 12, ``"true"`` ->
+    true) are deferred to gate ③; every other type mismatch is reported by gate
+    ② with ``kind="type"``.
     """
     return isinstance(value, str) and expected in {"integer", "number", "boolean"}
 
@@ -202,7 +208,7 @@ def _defer_to_coerce(value: Any, expected: Any) -> bool:
 def _schema_errors(
     data: dict[str, Any], schema: dict[str, Any]
 ) -> tuple[list[ArgIssue], list[str]]:
-    """② 关：必填 / 类型 / 枚举检查；同时收集多余字段（J3）。"""
+    """Gate ②: required / type / enum checks, also collecting extra fields (J3)."""
     properties: dict[str, Any] = schema.get("properties") or {}
     required: list[str] = list(schema.get("required") or [])
     issues: list[ArgIssue] = []
@@ -225,7 +231,8 @@ def _schema_errors(
         expected = prop.get("type")
         expected_types = [expected] if isinstance(expected, str) else list(expected or [])
         if expected_types and not any(_matches_type(value, t) for t in expected_types):
-            # 需要类型转换的字面量属于 ③ 关职责，② 关不重复报告
+            # Literals that need coercion are gate ③'s job; gate ② does not
+            # report them again.
             if _defer_to_coerce(value, expected):
                 continue
             issues.append(
@@ -248,7 +255,7 @@ def _schema_errors(
 def _coerce_params(
     data: dict[str, Any], schema: dict[str, Any]
 ) -> tuple[dict[str, Any] | None, list[ArgIssue]]:
-    """③ 关：类型转换 + 缺省填充；返回 ``(params, issues)``。"""
+    """Gate ③: coercion plus default filling; returns ``(params, issues)``."""
     properties: dict[str, Any] = schema.get("properties") or {}
     params = dict(data)
     issues: list[ArgIssue] = []
@@ -281,7 +288,7 @@ def _coerce_params(
 
 
 def _prune_extras(data: dict[str, Any], schema: dict[str, Any]) -> dict[str, Any]:
-    """丢弃多余字段（J3：允许并忽略，不报 3d）。"""
+    """Drop extra fields (J3: allowed and ignored, never a ``3d``)."""
     properties: dict[str, Any] = schema.get("properties") or {}
     if not properties:
         return dict(data)
@@ -289,22 +296,24 @@ def _prune_extras(data: dict[str, Any], schema: dict[str, Any]) -> dict[str, Any
 
 
 def validate_arguments(raw: str, schema: dict[str, Any]) -> ValidationOutcome:
-    """执行 ①②③ 三道关卡（第 ④ 关交由执行器）。
+    """Run gates ①②③ (gate ④ is left to the executor).
 
     Args:
-        raw: ``ToolCall.arguments`` 原始 JSON 字符串。
-        schema: 工具定义的 JSON Schema；``schema`` 为空时按"无约束"处理。
+        raw: The raw JSON string of ``ToolCall.arguments``.
+        schema: The tool's JSON Schema; an empty ``schema`` means "no constraints".
 
     Returns:
-        ``(ArgumentValidation, None)`` 成功，或 ``(None, ExecResult)`` 失败；
-        失败结果为 ``3d``，``content`` 是含 ``stage`` 与 ``errors`` 的合法 JSON。
+        ``(ArgumentValidation, None)`` on success, or ``(None, ExecResult)`` on
+        failure; the failure is ``3d`` whose ``content`` is valid JSON with
+        ``stage`` and ``errors``.
 
     Note:
-        不自动修复 JSON（J1）：截断、尾逗号、单引号等一切非法输入直接判 ① 关失败。
+        JSON is never auto-repaired (J1): truncation, trailing commas, single
+        quotes and every other invalid input fail gate ① immediately.
     """
     schema = schema or {}
 
-    # ① JSON 解析
+    # Gate ①: parse JSON
     try:
         data = json.loads(raw)
     except json.JSONDecodeError as exc:
@@ -320,16 +329,18 @@ def validate_arguments(raw: str, schema: dict[str, Any]) -> ValidationOutcome:
 
     canonical = dict(data)
 
-    # ② Schema 校验
+    # Gate ②: schema validation
     schema_issues, ignored = _schema_errors(data, schema)
 
-    # ③ 类型转换与缺省填充（多余字段先剔除，避免污染 kwargs）
-    # 三关合并：类型转换失败属于 ③ 关，但仍与 ② 关的错误一起回填（J2：一次给全）
+    # Gate ③: coercion and default filling (strip extras first so they cannot
+    # pollute kwargs). Both gates are merged: a coercion failure belongs to gate
+    # ③ but is fed back together with gate ② errors (J2: report everything at once).
     pruned = _prune_extras(data, schema)
     params, conversion_issues = _coerce_params(pruned, schema)
 
-    # ② 与 ③ 可能对同一字段报同一条 type 错误（② 判类型不符、③ 转不动）。
-    # 重复条目会让模型误以为有两个字段出错，这里去重：同一 (field, kind) 只留一条。
+    # Gates ② and ③ can both report the same type error for one field (② sees a
+    # mismatch, ③ cannot convert). Duplicate entries make the model think two
+    # fields are wrong, so deduplicate: keep one entry per (field, kind).
     merged: list[ArgIssue] = []
     seen: set[tuple[str, str]] = set()
     for issue in [*schema_issues, *conversion_issues]:
@@ -346,28 +357,29 @@ def validate_arguments(raw: str, schema: dict[str, Any]) -> ValidationOutcome:
     return ArgumentValidation(params=params, canonical=canonical, ignored=ignored), None
 
 
-# 兼容执行器的简化入口 -------------------------------------------------------
+# Simplified entry point kept for the executor -------------------------------
 
 
 def parse_call_arguments(call: ToolCall) -> dict[str, Any]:
-    """把 ``ToolCall.arguments`` 解析为 dict（执行器的轻量路径）。
+    """Parse ``ToolCall.arguments`` into a dict (the executor's lightweight path).
 
-    该路径**不做** schema 校验（编排层应在执行前调用 :func:`validate_arguments`）。
-    解析失败时抛 ``ValueError``，由执行器统一收敛为 ``3c``。
+    This path does **not** perform schema validation (the orchestration layer
+    should call :func:`validate_arguments` before executing). Parse failures
+    raise ``ValueError``, which the executor converges to ``3c``.
     """
     try:
         data = json.loads(call.arguments) if call.arguments.strip() else {}
     except json.JSONDecodeError as exc:
-        raise ValueError(f"arguments 不是合法 JSON: {exc}") from exc
+        raise ValueError(f"arguments is not valid JSON: {exc}") from exc
     if data is None:
         return {}
     if not isinstance(data, dict):
         raise ValueError(
-            f"arguments 必须是 JSON 对象，实际为 {_json_type_of(data)}"
+            f"arguments must be a JSON object, got {_json_type_of(data)}"
         )
     return data
 
 
 def type_name_for(expected: str) -> str:
-    """把 JSON Schema 类型名转成模型可读的写法（调试与轨迹使用）。"""
+    """Convert a JSON Schema type name into a model-readable form (used for debugging and traces)."""
     return "|".join(_TYPE_ALIASES.get(expected, (expected,)))
