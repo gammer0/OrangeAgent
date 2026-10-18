@@ -1,15 +1,21 @@
-"""内置工具实现：agent 实际可执行的原子能力。
+"""Builtin tool implementations: the atomic capabilities an agent actually runs.
 
-设计原则：
+Design principles:
 
-* **单一职责**：每个函数只做一件事，返回字符串（工具输出统一为文本）。
-* **沙箱边界**：所有文件操作限定在 ``workdir`` 内；越界直接抛异常。
-* **超时即失败**：任何执行类工具都在**子进程**里跑，带超时与输出截断，
-  避免 agent 写出死循环把主循环拖死（对应 ``execution.py`` 的 3b 超时降级）。
-* **不吞异常**：异常向上抛，由执行器统一翻译成 ``ExecResult.error_type``。
+* **Single responsibility**: each function does one thing and returns a string
+  (tool output is always text).
+* **Sandbox boundary**: every file operation is confined to ``workdir``; an
+  escape raises immediately.
+* **Timeout means failure**: every execution-style tool runs in a **child
+  process** with a timeout and output clipping, so an infinite loop written by
+  the agent cannot stall the main loop (matching the 3b timeout degradation in
+  ``execution.py``).
+* **Never swallow exceptions**: exceptions propagate and the executor translates
+  them uniformly into ``ExecResult.error_type``.
 
-工具路径与实现严格一一对应（``_REGISTRY``），未知路径直接拒绝，
-因此能力清单里的 ``path`` 无法指向任意代码。
+Tool paths map one-to-one onto implementations (``_REGISTRY``) and unknown paths
+are rejected, so a ``path`` in the capability manifest can never point at
+arbitrary code.
 """
 
 from __future__ import annotations
@@ -35,25 +41,25 @@ __all__ = [
     "DEFAULT_TIMEOUT_S",
 ]
 
-#: 单个工具输出上限（与 ``truncate.py`` 的 C1 协同，这里先粗截一刀）。
+#: Per-tool output cap (works with C1 in ``truncate.py``; this is a coarse first cut).
 MAX_OUTPUT_CHARS = 8_000
 
-#: 子进程默认超时（秒）。
+#: Default child-process timeout (seconds).
 DEFAULT_TIMEOUT_S = 20
 
 
 def _resolve(workdir: str, raw: str) -> Path:
-    """把用户路径解析到 workdir 内；越界抛 ``ValueError``。"""
+    """Resolve a user path inside ``workdir``; raises ``ValueError`` on escape."""
     base = Path(workdir).resolve()
     candidate = Path(raw)
     target = (candidate if candidate.is_absolute() else base / candidate).resolve()
     if target != base and base not in target.parents:
-        raise ValueError(f"路径越界（只能在工作目录内操作）: {raw}")
+        raise ValueError(f"path escapes the working directory: {raw}")
     return target
 
 
 def _clip(text: str) -> str:
-    """截断过长输出，保留头尾用于定位问题。"""
+    """Clip oversized output, keeping head and tail so problems remain locatable."""
     if len(text) <= MAX_OUTPUT_CHARS:
         return text
     head = MAX_OUTPUT_CHARS * 3 // 4
@@ -62,10 +68,11 @@ def _clip(text: str) -> str:
 
 
 def _run(cmd: list[str], cwd: str, timeout: int = DEFAULT_TIMEOUT_S) -> tuple[int, str]:
-    """在子进程运行命令，返回 ``(退出码, 合并输出)``。
+    """Run a command in a child process; returns ``(exit code, combined output)``.
 
-    强制 UTF-8 与 ``PYTHONIOENCODING``：Windows 子进程默认 GBK，
-    会把项目里的中文输出变成乱码，使 agent 误判失败。
+    UTF-8 and ``PYTHONIOENCODING`` are forced: Windows child processes default to
+    GBK, which turns the project's Chinese output into mojibake and makes the
+    agent misjudge a success as a failure.
     """
     env = {**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"}
     try:
@@ -80,25 +87,26 @@ def _run(cmd: list[str], cwd: str, timeout: int = DEFAULT_TIMEOUT_S) -> tuple[in
             env=env,
         )
     except subprocess.TimeoutExpired as exc:
-        raise TimeoutError(f"命令超时（>{timeout}s）: {' '.join(cmd)}") from exc
+        raise TimeoutError(f"command timed out (>{timeout}s): {' '.join(cmd)}") from exc
     output = (proc.stdout or "") + (proc.stderr or "")
     return proc.returncode, _clip(output.strip())
 
 
 # ---------------------------------------------------------------------------
-# 文件类
+# File tools
 # ---------------------------------------------------------------------------
 
 
 def file_read(workdir: str, path: str, offset: int = 0, limit: int = 120) -> str:
-    """读取文本文件；``offset`` / ``limit`` 以行为单位。
+    """Read a text file; ``offset`` / ``limit`` are in lines.
 
-    ponytail: 默认 120 行（原 400）——实测一次读整文件会吐出 8k 字符，
-    直接吃掉上下文。超长文件请用 offset 续读。
+    Note: the default is 120 lines (was 400) -- we measured that reading a whole
+    file at once emitted 8k characters and ate the context outright. Use offset
+    to continue reading long files.
     """
     target = _resolve(workdir, path)
     if not target.is_file():
-        raise FileNotFoundError(f"文件不存在: {path}")
+        raise FileNotFoundError(f"file does not exist: {path}")
     lines = target.read_text(encoding="utf-8", errors="replace").splitlines()
     chunk = lines[offset : offset + limit]
     body = "\n".join(f"{offset + i + 1:>4}| {line}" for i, line in enumerate(chunk))
@@ -106,18 +114,21 @@ def file_read(workdir: str, path: str, offset: int = 0, limit: int = 120) -> str
 
 
 def file_list(workdir: str, path: str = ".", pattern: str = "*") -> str:
-    """列出目录条目（目录在前，按名称排序）。"""
+    """List directory entries (directories first, sorted by name)."""
     target = _resolve(workdir, path)
     if not target.is_dir():
-        raise NotADirectoryError(f"不是目录: {path}")
+        raise NotADirectoryError(f"not a directory: {path}")
     items = sorted(target.glob(pattern), key=lambda p: (not p.is_dir(), p.name))[:300]
-    rows = [f"{'D' if p.is_dir() else 'F'} {p.name}" + (f"  ({p.stat().st_size}B)" if p.is_file() else "")
-            for p in items]
+    rows = [
+        f"{'D' if p.is_dir() else 'F'} {p.name}"
+        + (f"  ({p.stat().st_size}B)" if p.is_file() else "")
+        for p in items
+    ]
     return _clip("\n".join(rows) or "（空目录）")
 
 
 def file_write(workdir: str, path: str, content: str) -> str:
-    """整体写入文件（覆盖），父目录自动创建。"""
+    """Write a whole file (overwriting); parent directories are created."""
     target = _resolve(workdir, path)
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(content, encoding="utf-8")
@@ -125,7 +136,7 @@ def file_write(workdir: str, path: str, content: str) -> str:
 
 
 def file_append(workdir: str, path: str, content: str) -> str:
-    """追加写入文件（不存在则创建）。"""
+    """Append to a file (creating it when absent)."""
     target = _resolve(workdir, path)
     target.parent.mkdir(parents=True, exist_ok=True)
     with target.open("a", encoding="utf-8") as handle:
@@ -134,20 +145,20 @@ def file_append(workdir: str, path: str, content: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# 工作记忆（专用读写，不开放任意路径）
+# Working memory (dedicated read/write; no arbitrary paths)
 # ---------------------------------------------------------------------------
 
-#: 工作记忆相对路径（与 ``memory.py`` 保持一致，避免两处定义漂移）。
+#: Working-memory relative path (kept in sync with ``memory.py`` to avoid drift).
 _WORK_MEMORY_REL = ".agent/WORK.md"
 
 
 def _work_memory_file(workdir: str) -> Path:
-    """返回工作记忆文件的绝对路径（固定，不接受模型传参）。"""
+    """Return the absolute path of the working-memory file (fixed; never model-supplied)."""
     return _resolve(workdir, _WORK_MEMORY_REL)
 
 
 def memory_work_read(workdir: str, offset: int = 0, limit: int = 400) -> str:
-    """读取工作记忆。路径固定，模型无法指定别的文件。"""
+    """Read working memory. The path is fixed, so the model cannot target another file."""
     target = _work_memory_file(workdir)
     if not target.is_file():
         return f"（工作记忆尚不存在：{_WORK_MEMORY_REL}）"
@@ -155,12 +166,13 @@ def memory_work_read(workdir: str, offset: int = 0, limit: int = 400) -> str:
 
 
 def memory_work_append(workdir: str, content: str) -> str:
-    """向工作记忆追加一段内容。
+    """Append a block to working memory.
 
-    追加而非覆盖：工作记忆跨会话共享，覆盖会抹掉别的会话的记录。
+    Append rather than overwrite: working memory is shared across sessions, so
+    overwriting would erase what another session wrote.
     """
     if not content.strip():
-        raise ValueError("content 不能为空")
+        raise ValueError("content must not be empty")
     target = _work_memory_file(workdir)
     target.parent.mkdir(parents=True, exist_ok=True)
     suffix = "" if content.endswith("\n") else "\n"
@@ -170,9 +182,10 @@ def memory_work_append(workdir: str, content: str) -> str:
 
 
 def memory_work_replace(workdir: str, content: str) -> str:
-    """整体重写工作记忆（用于整理归纳）。
+    """Rewrite working memory entirely (for consolidation).
 
-    与 ``file_write`` 的区别：路径固定为工作记忆，无法写到别处。
+    Differs from ``file_write``: the path is fixed to working memory and cannot
+    write anywhere else.
     """
     target = _work_memory_file(workdir)
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -182,33 +195,34 @@ def memory_work_replace(workdir: str, content: str) -> str:
 
 
 def os_echo(text: str) -> str:
-    """原样返回文本。"""
+    """Return the text unchanged."""
     return text
 
 
 # ---------------------------------------------------------------------------
-# 网络类
+# Network tools
 # ---------------------------------------------------------------------------
 
-#: 网络工具默认超时（秒）。比执行类短：HTTP 卡住比命令卡住更常见。
+#: Default timeout for network tools (seconds). Shorter than execution tools:
+#: HTTP hanging is more common than a command hanging.
 HTTP_TIMEOUT_S = 15
 
-#: 允许的 URL scheme。只支持 http/https，避免 file:// 等意外协议。
+#: Allowed URL schemes. Only http/https, ruling out accidental protocols like file://.
 _ALLOWED_SCHEMES = ("http://", "https://")
 
 
 def _check_url(url: str) -> str:
-    """校验 URL 协议，越界抛 ``ValueError``。"""
+    """Validate the URL scheme; raises ``ValueError`` when it is not allowed."""
     text = (url or "").strip()
     if not text:
-        raise ValueError("URL 不能为空")
+        raise ValueError("URL must not be empty")
     if not text.lower().startswith(_ALLOWED_SCHEMES):
-        raise ValueError(f"只支持 http/https: {url}")
+        raise ValueError(f"only http/https is supported: {url}")
     return text
 
 
 def net_get(url: str, timeout: int = HTTP_TIMEOUT_S) -> str:
-    """GET 一个 URL，返回状态码、内容类型与响应体（截断）。"""
+    """GET a URL; returns status code, content type and body (clipped)."""
     import httpx
 
     target = _check_url(url)
@@ -216,9 +230,9 @@ def net_get(url: str, timeout: int = HTTP_TIMEOUT_S) -> str:
     try:
         response = httpx.get(target, timeout=limit, follow_redirects=True)
     except httpx.TimeoutException as exc:
-        raise TimeoutError(f"请求超时（{limit}s）: {target}") from exc
+        raise TimeoutError(f"request timed out ({limit}s): {target}") from exc
     except httpx.HTTPError as exc:
-        raise ConnectionError(f"请求失败: {type(exc).__name__}: {exc}") from exc
+        raise ConnectionError(f"request failed: {type(exc).__name__}: {exc}") from exc
 
     body = response.text
     head = (
@@ -236,7 +250,7 @@ def net_post(
     content_type: str = "application/json",
     timeout: int = HTTP_TIMEOUT_S,
 ) -> str:
-    """POST 一个 URL，``body`` 原样发送，返回状态码与响应体（截断）。"""
+    """POST to a URL sending ``body`` as-is; returns status code and body (clipped)."""
     import httpx
 
     target = _check_url(url)
@@ -248,9 +262,9 @@ def net_post(
             follow_redirects=True,
         )
     except httpx.TimeoutException as exc:
-        raise TimeoutError(f"请求超时（{limit}s）: {target}") from exc
+        raise TimeoutError(f"request timed out ({limit}s): {target}") from exc
     except httpx.HTTPError as exc:
-        raise ConnectionError(f"请求失败: {type(exc).__name__}: {exc}") from exc
+        raise ConnectionError(f"request failed: {type(exc).__name__}: {exc}") from exc
 
     text = response.text
     head = (
@@ -263,7 +277,7 @@ def net_post(
 
 
 def net_head(url: str, timeout: int = HTTP_TIMEOUT_S) -> str:
-    """HEAD 一个 URL，只返回状态与响应头（用于探测可用性，不下载正文）。"""
+    """HEAD a URL; returns status and headers only (probes availability without downloading)."""
     import httpx
 
     target = _check_url(url)
@@ -271,9 +285,9 @@ def net_head(url: str, timeout: int = HTTP_TIMEOUT_S) -> str:
     try:
         response = httpx.head(target, timeout=limit, follow_redirects=True)
     except httpx.TimeoutException as exc:
-        raise TimeoutError(f"请求超时（{limit}s）: {target}") from exc
+        raise TimeoutError(f"request timed out ({limit}s): {target}") from exc
     except httpx.HTTPError as exc:
-        raise ConnectionError(f"请求失败: {type(exc).__name__}: {exc}") from exc
+        raise ConnectionError(f"request failed: {type(exc).__name__}: {exc}") from exc
 
     lines = [
         f"状态 {response.status_code} {response.reason_phrase}",
@@ -283,12 +297,12 @@ def net_head(url: str, timeout: int = HTTP_TIMEOUT_S) -> str:
 
 
 # ---------------------------------------------------------------------------
-# 执行类
+# Execution tools
 # ---------------------------------------------------------------------------
 
 
 def shell_run(workdir: str, command: str, timeout: int = DEFAULT_TIMEOUT_S) -> str:
-    """在 workdir 内执行一次命令（不经过 shell 解释器拼接）。"""
+    """Run one command inside ``workdir`` (no shell-interpreter string splicing)."""
     if timeout > 120:
         timeout = 120
     code, output = _run(
@@ -326,12 +340,12 @@ def py_run_brief(workdir: str, path: str, timeout: int = DEFAULT_TIMEOUT_S) -> s
 
 
 # ---------------------------------------------------------------------------
-# 游戏验收类
+# Game acceptance
 # ---------------------------------------------------------------------------
 
 
 def snake_check(workdir: str, path: str = "snake_game") -> str:
-    """贪吃蛇验收：检查目录结构、关键文件与常见缺陷。"""
+    """Snake acceptance: checks directory structure, key files and common defects."""
     base = _resolve(workdir, path)
     if not base.is_dir():
         raise NotADirectoryError(f"目录不存在: {path}")
@@ -386,8 +400,9 @@ def snake_check(workdir: str, path: str = "snake_game") -> str:
     return json.dumps(report, ensure_ascii=False, indent=2)
 
 
-#: 无头自检驱动：探针脚本，不依赖被测项目的具体 API，只看"能否稳定推进状态"。
-#: 以 ``<包名>.<模块>`` 形式导入，兼容项目内部的相对导入。
+#: Headless self-check driver: a probe script that does not depend on the project's
+#: concrete API, only on whether state advances reliably.
+#: Imported as ``<package>.<module>``, which also supports intra-project relative imports.
 _DEMO_DRIVER = r'''
 import importlib, json, os, sys
 sys.path.insert(0, os.getcwd())
@@ -412,7 +427,8 @@ for base in BASES:
     for name in ("SnakeGame", "Game"):
         CANDIDATES.append((base, name))
 
-# 如果包里提供了 game 模块，它的父包也应被尝试（snake_game.game）
+# If the package provides a game module, its parent package should be tried too
+# (snake_game.game)
 if package and f"{package}.game" not in BASES:
     CANDIDATES.append((f"{package}.game", "SnakeGame"))
 
@@ -484,16 +500,18 @@ raise SystemExit(0 if not errors else 5)
 
 
 def snake_demo(workdir: str, path: str = "snake_game", steps: int = 200, seed: int = 7) -> str:
-    """无头自检：以固定随机种子推进若干帧，验证核心逻辑不崩溃。
+    """Headless self-check: advance frames with a fixed seed and verify the core logic does not crash.
 
-    探针会在 ``<path>/game.py``、``<包名>.game`` 等位置寻找 ``SnakeGame`` / ``Game``，
-    因此项目既可以扁平布局也可以包布局。
+    The probe looks for ``SnakeGame`` / ``Game`` in places such as
+    ``<path>/game.py`` and ``<package>.game``, so a project can use either a flat
+    layout or a package layout.
     """
     base = _resolve(workdir, path)
     if not base.is_dir():
         raise NotADirectoryError(f"目录不存在: {path}")
-    # 包布局（含或不含 __init__.py 的命名空间包）从父目录导入 ``<包名>.game``；
-    # 扁平布局则从目录内部导入 ``game``。
+    # A package layout (including namespace packages with or without __init__.py)
+    # imports ``<package>.game`` from the parent directory; a flat layout imports
+    # ``game`` from inside the directory.
     package = base.name if base.name.isidentifier() else ""
     code, output = _run(
         [sys.executable, "-B", "-c", _DEMO_DRIVER, str(steps), str(seed), package],
@@ -504,27 +522,27 @@ def snake_demo(workdir: str, path: str = "snake_game", steps: int = 200, seed: i
 
 
 # ---------------------------------------------------------------------------
-# MCP（filesystem 语义）命名空间
+# MCP (filesystem semantics) namespace
 # ---------------------------------------------------------------------------
 
 
 def mcp_fs_read(workdir: str, path: str) -> str:
-    """MCP filesystem read_text_file 的等价实现。"""
+    """Equivalent of MCP filesystem read_text_file."""
     return file_read(workdir, path, limit=2_000)
 
 
 def mcp_fs_write(workdir: str, path: str, content: str) -> str:
-    """MCP filesystem write_file 的等价实现。"""
+    """Equivalent of MCP filesystem write_file."""
     return file_write(workdir, path, content)
 
 
 def mcp_fs_list(workdir: str, path: str = ".") -> str:
-    """MCP filesystem list_directory 的等价实现。"""
+    """Equivalent of MCP filesystem list_directory."""
     return file_list(workdir, path)
 
 
 # ---------------------------------------------------------------------------
-# 规格表
+# Specification table
 # ---------------------------------------------------------------------------
 
 
@@ -539,10 +557,11 @@ def _spec(
     scope: str = "project",
     hidden: tuple[str, ...] = (),
 ) -> dict[str, Any]:
-    """构造一条工具规格。
+    """Build one tool specification.
 
     Args:
-        hidden: 由运行时注入、不暴露给模型的参数名（如 ``workdir``）。
+        hidden: Names of parameters injected by the runtime and not exposed to
+            the model (e.g. ``workdir``).
     """
     return {
         "path": path,
@@ -561,7 +580,7 @@ def _spec(
 
 
 _STR = {"type": "string"}
-#: 规格表：路径 → 定义。顺序即 CLI 展示顺序。
+#: Specification table: path -> definition. Order is the CLI display order.
 TOOL_SPECS: dict[str, dict[str, Any]] = {
     s["path"]: s
     for s in [
@@ -630,18 +649,20 @@ TOOL_SPECS: dict[str, dict[str, Any]] = {
 
 
 def known_paths() -> list[str]:
-    """规格表中全部内置路径（排序）。"""
+    """All builtin paths in the specification table (sorted)."""
     return sorted(TOOL_SPECS)
 
 
 def build_tool(path: str, workdir: str) -> ToolDef:
-    """按路径构造绑定到 ``workdir`` 的可执行 ``ToolDef``。
+    """Build an executable ``ToolDef`` by path, bound to ``workdir``.
 
-    绑定只注入**:attr:`_spec` 声明为 ``hidden`` 的参数**，其余参数完全交给模型；
-    模型即使传入 ``workdir`` 也会被丢弃，因此工作目录边界不可被参数绕过。
+    Binding injects **only the parameters declared ``hidden`` in :attr:`_spec`**;
+    every other parameter is left entirely to the model. Even if the model passes
+    ``workdir`` it is discarded, so the working-directory boundary cannot be
+    bypassed through arguments.
 
     Raises:
-        KeyError: 路径不在规格表中。
+        KeyError: The path is not in the specification table.
     """
     spec = TOOL_SPECS[path]
     fn = spec["fn"]
@@ -650,7 +671,7 @@ def build_tool(path: str, workdir: str) -> ToolDef:
     default_scope = "project"
 
     def bound(**kwargs: Any) -> str:
-        """注入隐藏参数后调用实现。"""
+        """Inject the hidden parameters and call the implementation."""
         call_kwargs = {k: v for k, v in kwargs.items() if k not in hidden}
         if "workdir" in hidden or "workdir" in params:
             call_kwargs["workdir"] = workdir
