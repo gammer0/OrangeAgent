@@ -447,6 +447,7 @@ const state = {
   current: null,      // session id
   source: null,       // EventSource
   trace: [],
+  lastSeq: 0,         // highest trace seq received; resume point for SSE
   usage: { tokens: 0, capacity: 0, ratio: 0 },
   models: [],
 };
@@ -580,6 +581,7 @@ async function selectSession(id) {
   if (state.current === id) return;
   state.current = id;
   state.trace = [];
+  state.lastSeq = 0;
   state.usage = { tokens: 0, capacity: 0, ratio: 0 };
   renderSessions();
   resetChat();
@@ -601,11 +603,17 @@ async function selectSession(id) {
       kind: e.kind,
       payload: e.payload,
       ts: e.ts,
+      seq: e.seq,
     }));
     if (state.trace.length > MAX_TRACE) state.trace = state.trace.slice(-MAX_TRACE);
     renderTrace();
   } catch (e) { /* trace is diagnostic; a failure must not block the chat */ }
 
+  // Resume the stream after the last stored event, so the replay cannot
+  // duplicate what the trace store just supplied.
+  state.lastSeq = state.trace.length
+    ? Math.max(...state.trace.map((t) => t.seq || 0))
+    : 0;
   openStream(id);
 }
 
@@ -689,7 +697,10 @@ function closeStream() {
 
 function openStream(id) {
   closeStream();
-  const src = new EventSource(`/api/sessions/${id}/events`);
+  // Pass the resume point as a query parameter: EventSource cannot set custom
+  // headers, and without it every select would re-receive the retained backlog.
+  const from = state.lastSeq || 0;
+  const src = new EventSource(`/api/sessions/${id}/events?after_seq=${from}`);
   state.source = src;
 
   src.onopen = () => { $("health-dot").className = "dot ok"; };
@@ -707,8 +718,9 @@ function openStream(id) {
 }
 
 function handleEvent(ev) {
-  const { kind, payload, ts } = ev;
-  pushTrace(kind, payload, ts);
+  const { kind, payload, ts, seq } = ev;
+  if (typeof seq === "number") state.lastSeq = Math.max(state.lastSeq || 0, seq);
+  pushTrace(kind, payload, ts, seq);
 
   switch (kind) {
     case "assistant":
@@ -761,8 +773,15 @@ function updateSendState(stateName) {
 
 /* ---------------- 轨迹 ---------------- */
 
-function pushTrace(kind, payload, ts) {
-  state.trace.push({ kind, payload, ts: ts || Date.now() / 1000 });
+function pushTrace(kind, payload, ts, seq) {
+  // Two sources feed this list: the persisted trace loaded on select, and the
+  // live SSE stream. After a select the stream replays whatever the server still
+  // retains, which overlaps the stored backlog -- so an event that arrives twice
+  // must be dropped, keyed by seq when available.
+  if (seq != null) {
+    if (state.trace.some((t) => t.seq === seq)) return;
+  }
+  state.trace.push({ kind, payload, ts: ts || Date.now() / 1000, seq });
   if (state.trace.length > MAX_TRACE) state.trace.shift();
   renderTrace();
 }

@@ -306,30 +306,58 @@ def create_app(workdir: str | Path | None = None) -> FastAPI:
         model's context and prunes discovery scaffolding once it has served its
         purpose, while the trace is what the user reads to see how a tool was
         found -- including after a restart.
+
+        Reads the table rather than the replay buffer: the buffer is bounded (it
+        only serves as SSE backlog), while the audit trail must not be truncated.
         """
         runner = _require(manager_or_503(), session_id)
-        events = [
-            event.to_dict() for event in list(runner._recent)  # noqa: SLF001 - same app
-        ]
+        events: list[dict[str, Any]] = []
+        if runner.store is not None:
+            # Flush first: events emitted since the last safe point are still in
+            # the runner's buffer, and a page load must not miss them.
+            runner.persist_trace()
+            try:
+                for row in runner.store.load_trace_events(session_id):
+                    try:
+                        payload = json.loads(row.payload)
+                    except (ValueError, TypeError):
+                        continue
+                    if not isinstance(payload, dict):
+                        continue
+                    events.append(
+                        {
+                            "seq": row.seq,
+                            "ts": row.created_at,
+                            "kind": row.kind,
+                            "payload": payload,
+                        }
+                    )
+            except Exception as exc:  # noqa: BLE001 - a damaged trace is not fatal
+                raise HTTPException(status_code=500, detail=str(exc)) from exc
         return {"session_id": session_id, "events": events}
 
     # ---- SSE ----
 
     @app.get("/api/sessions/{session_id}/events")
-    async def stream_events(session_id: str, request: Request) -> StreamingResponse:
+    async def stream_events(
+        session_id: str, request: Request, after_seq: int = 0
+    ) -> StreamingResponse:
         """SSE event stream: assistant / tool / route / compress / usage / state / error.
 
         Each connection subscribes independently (broadcast fan-out), so opening a
         second tab cannot steal events from the first. ``Last-Event-ID`` replays
-        whatever the client missed while disconnected.
+        whatever the client missed while disconnected; ``after_seq`` does the same
+        for a client that cannot set headers (``EventSource``) and has already
+        loaded the persisted trace, which would otherwise be replayed twice.
         """
         runner = _require(manager_or_503(), session_id)
         try:
-            after_seq = int(request.headers.get("last-event-id") or 0)
+            header_seq = int(request.headers.get("last-event-id") or 0)
         except ValueError:
-            after_seq = 0
+            header_seq = 0
+        resume = max(header_seq, after_seq)
         return StreamingResponse(
-            _event_stream(runner, request, after_seq),
+            _event_stream(runner, request, resume),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
