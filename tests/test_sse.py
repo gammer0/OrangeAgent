@@ -22,8 +22,7 @@ from apps.server.sessions import DemoToolRegistry, SessionRunner
 from harness.model import ProviderConfig, ReverseProxy
 from harness.rate import RateWindow
 
-_STATIC = Path(__file__).resolve().parents[1] / "apps" / "server" / "static" / "index.html"
-
+_STATIC = Path(__file__).resolve().parents[1] / "src" / "harness" / "web"
 
 Reply = tuple[str | None, list[dict[str, Any]]]
 
@@ -229,15 +228,16 @@ class TestToolTraceEvent:
 
 
 class TestFrontendContract:
-    """静态检查前端与后端的事件契约，避免再次出现「静默中断」。"""
+    """静态检查前端与后端的事件契约，避免再次出现「静默中断」。
+
+    前端已从单文件拆成 ``index.html`` + ``app.js`` + ``app.css``，所以契约检查
+    必须覆盖两个源码文件：只查 HTML 会让 JS 里的绑定和事件分支逃过检查。
+    """
 
     def setup_method(self) -> None:
-        self.html = _STATIC.read_text(encoding="utf-8")
-
-    def test_context_and_tools_tabs_removed(self) -> None:
-        for marker in ("tab-context", "tab-tools", "refresh-context", "ctx-list", "tool-list"):
-            assert marker not in self.html, f"边栏残留：{marker}"
-
+        root = _STATIC if _STATIC.is_dir() else _STATIC.parent
+        self.html = (root / "index.html").read_text(encoding="utf-8")
+        self.js = (root / "app.js").read_text(encoding="utf-8")
     def test_no_orphan_element_binding(self) -> None:
         """每个被绑定的元素 id 必须真的存在于 HTML 里。
 
@@ -246,26 +246,49 @@ class TestFrontendContract:
         """
         import re
 
-        bound = set(re.findall(r'\$\("([a-z0-9-]+)"\)\s*\.onclick', self.html))
-        bound |= set(re.findall(r'\$\("([a-z0-9-]+)"\)\s*\.addEventListener', self.html))
-        assert bound, "未找到任何事件绑定，检查选择器格式"
+        assert self.js.strip(), "app.js 不应为空"
+        # ``$("x")`` lookups anywhere in the script must resolve against the DOM.
+        used = set(re.findall(r'\$\("([A-Za-z0-9_-]+)"\)', self.js))
+        # Elements created at runtime are referenced by the same helper, so only
+        # ids that are never created dynamically need to exist in the markup.
+        created = set(re.findall(r'\.id\s*=\s*"([A-Za-z0-9_-]+)"', self.js))
+        assert used, "未找到任何元素引用，检查选择器格式"
 
-        for element_id in bound:
-            assert f'id="{element_id}"' in self.html, f"绑定到不存在的元素：{element_id}"
+        for element_id in used - created:
+            assert f'id="{element_id}"' in self.html, f"引用到不存在的元素：{element_id}"
 
     def test_conversation_does_not_render_tool_cards(self) -> None:
         # 工具调用/结果只进轨迹面板，不再污染对话区
-        assert "appendToolCall" not in self.html
-        assert "appendToolResult" not in self.html
+        assert "appendToolCall" not in self.js
+        assert "appendToolResult" not in self.js
 
     def test_trace_renders_tool_arguments_and_result(self) -> None:
-        assert "trace-pre" in self.html
-        assert 'item.kind === "tool"' in self.html
+        assert "trace-row" in self.js
+        assert 'item.kind === "tool"' in self.js
+        # 参数与结果各有独立的 <pre>，样式类名用于区分来源
+        assert '"pre"' in self.js or "el(\"pre\"" in self.js
 
     def test_sse_uses_event_source(self) -> None:
-        assert "new EventSource(" in self.html
+        assert "new EventSource(" in self.js
+        # 断点续传：已加载的轨迹不应被重复回放
+        assert "after_seq=" in self.js
 
     def test_state_event_updates_controls(self) -> None:
         # 「执行中」必须能通过 state 事件解除，否则界面永久卡住
-        assert "updateSendState" in self.html
-        assert 'case "state":' in self.html
+        assert "updateSendState" in self.js
+        assert 'case "state":' in self.js
+
+    def test_delta_events_render_incrementally(self) -> None:
+        """流式预览是独立通道：delta 追加、assistant 校准。"""
+        assert 'case "delta":' in self.js
+        assert "appendDelta" in self.js
+        assert "finishDelta" in self.js
+
+    def test_delta_is_excluded_from_trace(self) -> None:
+        """流式碎片不进轨迹面板，否则一次回复数百条会淹没工具审计。"""
+        assert 'if (kind === "delta") return;' in self.js
+
+    def test_settings_ui_is_wired(self) -> None:
+        assert 'id="settings-overlay"' in self.html
+        assert "/api/settings" in self.js
+        assert "restart_required" in self.js

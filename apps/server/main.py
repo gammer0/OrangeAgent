@@ -52,7 +52,25 @@ from harness.defaults import DEFAULT_CONTEXT
 from harness.rate import RateWindow
 
 APP_DIR = Path(__file__).resolve().parent
-STATIC_DIR = APP_DIR / "static"
+
+
+def _static_dir() -> Path:
+    """Locate the frontend assets, preferring the copy shipped inside the package.
+
+    The frontend lives in ``harness/web`` so an installed wheel carries it: a
+    directory beside this module only exists in a source checkout. Preferring the
+    package copy means a pip-installed console and a dev checkout render the same
+    UI rather than drifting apart.
+    """
+    import harness
+
+    packaged = Path(harness.__file__).resolve().parent / "web"
+    if packaged.is_dir():
+        return packaged
+    return APP_DIR / "static"
+
+
+STATIC_DIR = _static_dir()
 
 
 # ---------------------------------------------------------------------------
@@ -80,6 +98,17 @@ class UpdateSessionBody(BaseModel):
     """Update-session request body."""
 
     model: str | None = None
+
+
+class UpdateSettingsBody(BaseModel):
+    """Settings write request body.
+
+    ``values`` maps ``"group.name"`` to the new value, e.g.
+    ``{"loop.max_steps": 60}``. Types are validated against the shipped schema by
+    :mod:`harness.settings`, not here, so the two can never drift apart.
+    """
+
+    values: dict[str, Any] = Field(default_factory=dict, description="键值对，如 loop.max_steps")
 
 
 # ---------------------------------------------------------------------------
@@ -226,6 +255,63 @@ def create_app(workdir: str | Path | None = None) -> FastAPI:
                 for entry in sorted(entries.values(), key=lambda e: e.path)
             ]
         }
+
+    # ---- settings ----
+
+    @app.get("/api/settings")
+    async def get_settings() -> dict[str, Any]:
+        """Effective hyperparameters grouped by area, with override provenance.
+
+        ``overridden`` tells the UI whether a value came from ``settings.json`` or
+        is still the shipped default, so it can offer a per-item reset.
+        """
+        from harness.settings import effective_config, settings_path
+
+        return {
+            "groups": effective_config(),
+            "file": str(settings_path()),
+        }
+
+    @app.patch("/api/settings")
+    async def update_settings(body: UpdateSettingsBody) -> dict[str, Any]:
+        """Persist hyperparameter overrides.
+
+        Only whitelisted keys are accepted; secrets are deliberately absent from
+        the schema, so this endpoint cannot be used to write an API key to disk.
+        A value marked ``restart_required`` still needs a restart -- the response
+        says which ones so the UI can prompt instead of silently lying.
+        """
+        from harness.settings import (
+            RESTART_REQUIRED,
+            SettingsError,
+            effective_config,
+            write_overrides,
+        )
+
+        try:
+            write_overrides(body.values)
+        except SettingsError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        needs_restart = sorted(k for k in body.values if k in RESTART_REQUIRED)
+        return {
+            "groups": effective_config(),
+            "applied": sorted(k for k in body.values if k not in RESTART_REQUIRED),
+            "restart_required": needs_restart,
+        }
+
+    @app.delete("/api/settings")
+    async def reset_settings(keys: str | None = None) -> dict[str, Any]:
+        """Drop overrides so the shipped defaults apply again.
+
+        Args:
+            keys: Comma-separated list; omit to reset everything.
+        """
+        from harness.settings import clear_overrides, effective_config
+
+        targets = [k.strip() for k in keys.split(",")] if keys else None
+        clear_overrides(targets)
+        return {"groups": effective_config()}
 
     # ---- sessions ----
 

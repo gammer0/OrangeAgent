@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import sys
 from pathlib import Path
@@ -254,6 +255,44 @@ def _cmd_service_doctor(args: argparse.Namespace) -> int:
         return 1 if hard_failures else 0
     finally:
         service.close()
+
+
+def _cmd_serve(args: argparse.Namespace) -> int:
+    """``harness serve``: run the web console.
+
+    Exists so an installed copy needs no knowledge of ASGI entry points or
+    uvicorn flags -- ``harness serve`` is the whole command. Errors are reported
+    as a sentence rather than a traceback, because the common failure (wrong
+    working directory, missing key) is a user mistake, not a bug.
+    """
+    try:
+        import uvicorn
+    except ImportError:  # pragma: no cover - declared dependency
+        print("缺少 uvicorn，请重新安装：uv tool install . --force", file=sys.stderr)
+        return 1
+
+    workdir = Path(args.workdir).resolve()
+    # ``create_app`` reads the working directory to locate ``.env`` and the tool
+    # root, so the process must actually be there -- passing the path alone is
+    # not enough.
+    os.chdir(workdir)
+
+    if not args.json:
+        print(f"Harness 控制台：http://{args.host}:{args.port}")
+        print(f"工作目录：{workdir}")
+        print("按 Ctrl+C 停止\n")
+
+    try:
+        uvicorn.run(
+            "apps.server.main:app",
+            host=args.host,
+            port=args.port,
+            reload=bool(args.reload),
+            log_level="info",
+        )
+    except KeyboardInterrupt:  # pragma: no cover - interactive
+        print("\n已停止")
+    return 0
 
 
 def _cmd_service_sweep(args: argparse.Namespace) -> int:
@@ -1173,6 +1212,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--json", action="store_true", help="输出 JSON")
     sub = parser.add_subparsers(dest="command", required=True)
+
+    # ---- serve ----
+    serve = sub.add_parser("serve", help="启动 Web 控制台（等同于跑 uvicorn）")
+    _add_common_options(serve)
+    serve.add_argument("--host", default="127.0.0.1", help="监听地址，默认仅本机")
+    serve.add_argument("--port", type=int, default=8012, help="端口，默认 8012")
+    serve.add_argument("--reload", action="store_true", help="改动自动重载（开发用）")
+    serve.set_defaults(func=_cmd_serve)
 
     # ---- service ----
     service = sub.add_parser("service", help="服务管理与状态")

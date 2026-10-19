@@ -54,6 +54,7 @@ from harness.permission import AgentPermissions
 from harness.permission_store import WEB_AGENT, load_permissions
 from harness.session import Session, SessionRecord
 from harness.session_store import SessionStore
+from harness.settings import read_overrides
 from harness.tool_tree import EMPTY_SCHEMA, FlatStore, ToolDef, build_tree
 
 __all__ = [
@@ -86,6 +87,35 @@ EVENT_REPLAY_MAX = 500
 #: How deep the tool index goes when advertised to the model. ``1`` exposes only
 #: the resource roots (``/tool``, ``/mcp``, ``/skill``), forcing a descent.
 INDEX_DEPTH = 1
+
+
+def effective_limits() -> dict[str, int]:
+    """Resolve the per-turn limits from settings, falling back to shipped defaults.
+
+    Values are re-read for every turn rather than captured once at import, so a
+    change made in the settings screen applies to the next message without a
+    restart. Bad values cannot escape :func:`harness.settings.read_overrides`,
+    which drops unknown or malformed entries.
+
+    Returns:
+        ``max_steps`` / ``max_injects`` / ``max_workers`` as integers.
+    """
+    from harness.defaults import DEFAULT_EXECUTION, DEFAULT_LOOP
+
+    raw = read_overrides()
+
+    def pick(key: str, fallback: int) -> int:
+        value = raw.get(key, fallback)
+        try:
+            return max(1, int(value))
+        except (TypeError, ValueError):
+            return fallback
+
+    return {
+        "max_steps": pick("loop.max_steps", DEFAULT_LOOP.max_steps),
+        "max_injects": pick("loop.max_injects", DEFAULT_LOOP.max_injects),
+        "max_workers": pick("execution.max_workers", DEFAULT_EXECUTION.max_workers),
+    }
 
 #: Seconds a turn may go without any forward progress before it is abandoned.
 #: Measured from the last delta or completed batch, not from the turn start, so a
@@ -825,7 +855,13 @@ class SessionRunner:
             on_delta=self._on_delta,
         )
 
-        controller = StepController(max_steps=20)
+        # Loop limits come from the effective configuration (settings.json >
+        # env > shipped defaults) so the settings screen takes effect without a
+        # rebuild. Read here, per turn, because these are cheap to look up.
+        limits = effective_limits()
+        controller = StepController(
+            max_steps=limits["max_steps"], max_injects=limits["max_injects"]
+        )
         loop = AgentLoop(
             model=self._model_client(),
             inbox=self.inbox,
