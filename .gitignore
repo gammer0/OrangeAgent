@@ -37,6 +37,9 @@ coverage.xml
 *~
 .DS_Store
 
+# Agent customization (local-only: skills, agents, prompts)
+.github/*
+
 # Runtime output
 output/
 
