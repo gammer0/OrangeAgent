@@ -50,17 +50,30 @@ function fmtNum(n) {
 }
 
 async function api(path, options = {}) {
-  const res = await fetch(path, {
-    headers: { "Content-Type": "application/json" },
-    ...options,
-  });
+  let res;
+  try {
+    res = await fetch(path, {
+      headers: { "Content-Type": "application/json" },
+      ...options,
+    });
+  } catch {
+    // ``fetch`` rejects with a bare "Failed to fetch" when the server is gone.
+    // That message tells a user nothing actionable, so replace it: in practice
+    // the backend process died, was restarted on another port, or was never
+    // started in the first place.
+    const err = new Error("无法连接服务，请确认 harness serve 仍在运行");
+    err.offline = true;
+    throw err;
+  }
   if (!res.ok) {
     let detail = res.statusText;
     try {
       const body = await res.json();
       detail = body.detail || detail;
     } catch { /* non-JSON error body */ }
-    throw new Error(detail);
+    const err = new Error(detail);
+    err.status = res.status;
+    throw err;
   }
   if (res.status === 204) return null;
   return res.json();
@@ -91,9 +104,11 @@ async function checkHealth() {
     $("tool-count").textContent = data.ok
       ? `${data.tools} 个工具 · ${data.skills} 个技能`
       : "";
-  } catch {
+  } catch (e) {
     $("pulse").className = "pulse err";
-    $("health-text").textContent = "无法连接";
+    // Distinguish "backend gone" from "backend up but unhealthy": the first needs
+    // a restart, the second needs the error detail from /api/health.
+    $("health-text").textContent = e.offline ? "服务未运行" : "服务异常";
     $("tool-count").textContent = "";
   }
 }
@@ -619,14 +634,30 @@ async function openSettings() {
   $("settings-overlay").classList.add("show");
   $("settings-msg").className = "msg";
   $("settings-msg").textContent = "标有「重启生效」的项目需重启服务";
+  await loadSettings();
+}
+
+async function loadSettings() {
+  const box = $("settings-body");
+  box.innerHTML = "";
+  box.appendChild(el("div", "empty", "加载中…"));
   try {
     const data = await api("/api/settings");
     state.settings = data.groups || {};
     $("settings-file").textContent = data.file || "";
     renderSettings();
   } catch (e) {
-    $("settings-body").innerHTML = "";
-    $("settings-body").appendChild(el("div", "empty", `加载失败：${e.message}`));
+    // A dead end here is frustrating: show why, and offer the one action that
+    // can help without forcing the user to close and reopen the dialog.
+    box.innerHTML = "";
+    const wrap = el("div", "empty");
+    wrap.appendChild(el("div", null, `设置加载失败：${e.message}`));
+    const retry = el("button", "btn ghost", "重试");
+    retry.style.marginTop = "12px";
+    retry.onclick = () => loadSettings();
+    wrap.appendChild(retry);
+    box.appendChild(wrap);
+    setSettingsMsg(e.offline ? "服务未响应" : "加载失败", "err");
   }
 }
 

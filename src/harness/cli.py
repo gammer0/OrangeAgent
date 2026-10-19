@@ -1448,8 +1448,27 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _use_utf8_output() -> None:
+    """Force UTF-8 on stdout/stderr so Chinese text survives a Windows console.
+
+    Python picks the console's legacy code page (cp936 on zh-CN Windows) for
+    standard streams, so every Chinese message came out as mojibake such as
+    ``宸茬敓鎴``. Reconfiguring the streams is the only fix that works for both
+    a redirected pipe and an interactive terminal.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        encoding = (getattr(stream, "encoding", "") or "").lower().replace("-", "")
+        if encoding == "utf8":
+            continue
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]
+        except (AttributeError, ValueError):  # pragma: no cover - exotic stream types
+            continue
+
+
 def main(argv: list[str] | None = None) -> int:
     """CLI 入口，返回退出码。"""
+    _use_utf8_output()
     parser = build_parser()
     args = parser.parse_args(argv)
     try:

@@ -292,3 +292,15 @@ class TestFrontendContract:
         assert 'id="settings-overlay"' in self.html
         assert "/api/settings" in self.js
         assert "restart_required" in self.js
+
+    def test_offline_failure_is_explained(self) -> None:
+        """服务挂了不能只显示 ``Failed to fetch``。
+
+        用户看到原始 fetch 报错完全无法判断该做什么；把它换成可执行的提示，
+        并在设置弹窗里给出重试按钮，是唯一能自救的路径。
+        """
+        assert "无法连接服务" in self.js
+        assert "err.offline = true" in self.js
+        # the settings dialog must offer a retry rather than a dead end
+        assert "重试" in self.js
+        assert "loadSettings" in self.js
