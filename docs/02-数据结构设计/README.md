@@ -33,8 +33,8 @@
 | 04 | [工具与权限](04-工具与权限.md) | 扁平存储与树视图、构建算法、挂载与卸载、权限模型、schema 下发 |
 | 05 | [记忆](05-记忆.md) | `WORK.md` / `MEMORY.md` / 结算提取 |
 | 06 | [执行](06-执行.md) | `BatchPlan` / `ExecGroup` / 子批次安全点 |
-| 07 | [轨迹](07-轨迹.md) | `TraceEvent` 与 payload |
-| 08 | [运行时状态](08-运行时状态.md) | `Watermark` / `JudgeResult` / `RouteDecision` |
+| 07 | [轨迹](07-轨迹.md) | `TraceEvent` 与 payload；JSONL 文件与 `trace_events` 表两套存储 |
+| 08 | [运行时状态](08-运行时状态.md) | `Watermark` / `JudgeResult` / `RouteDecision`；判定顺序与推理超时守卫 |
 | 09 | [参数校验](09-参数校验.md) | `arguments` 四道关卡与 `3d` |
 | 10 | [模型层](10-模型层.md) | `RateWindow` / `ProviderHealth` / 成本归集 |
 | 11 | [结构关系](11-结构关系.md) | 全局关系图 |
@@ -56,6 +56,7 @@
 | `C1`–`C8` | 记忆 | 05-记忆 |
 | `D1`–`D8` | 执行 | 06-执行 |
 | `E1`–`E3` | 轨迹 | 07-轨迹 |
+| `W1`–`W4` | Web 轨迹表 | 07-轨迹 |
 | `F1`–`F2` | 运行时状态 | 08-运行时状态 |
 | `J1`–`J4` | 参数校验 | 09-参数校验 |
 | `K1`–`K7` | 模型层 | 10-模型层 |

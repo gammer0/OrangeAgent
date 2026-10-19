@@ -112,7 +112,8 @@ uv run uvicorn apps.server.main:app --reload --port 8000
 | GET | `/api/sessions/{id}/messages` | 历史 + token 统计 |
 | POST | `/api/sessions/{id}/messages` | 发送消息（`chat` / `control`） |
 | POST | `/api/sessions/{id}/cancel` | 中止本轮 |
-| GET | `/api/sessions/{id}/events` | SSE 事件流 |
+| GET | `/api/sessions/{id}/trace` | 持久化轨迹（工具、路由、下钻） |
+| GET | `/api/sessions/{id}/events` | SSE 事件流（支持 `after_seq` / `Last-Event-ID` 断点续传） |
 
 ### SSE 帧格式
 
@@ -123,20 +124,35 @@ data: {"seq":12,"ts":1729000000.1,"kind":"assistant","payload":{...}}
 : ping
 ```
 
-`seq` 在会话内单调递增，可用于去重；空闲时每 15 秒发送一次心跳注释。
+`seq` 在会话内单调递增，前端按它去重并作为断点续传的游标；空闲时每 15 秒发送一次心跳注释。
+
+`EventSource` 无法自定义请求头，所以除 `Last-Event-ID` 外还支持 `?after_seq=N` 查询参数，供已加载历史轨迹的客户端跳过重复回放。
+
+### 事件类型
+
+| kind | 时机 | 是否持久化 |
+|---|---|---|
+| `delta` | 模型输出的每个文本片段 | ❌ 仅实时预览 |
+| `assistant` | 一轮回复完成 | ✅ 消息表 |
+| `tool` | 工具结果回填 | ✅ 轨迹表 |
+| `route` / `compress` / `usage` / `state` / `error` | 路由、压缩、水位、状态、错误 | ✅ 轨迹表 |
+| `inject` | 安全点插入用户消息 | ✅ 轨迹表 |
 
 ---
 
 ## 5. 内置工具
 
-服务层自带四个演示工具（真实场景应由配置/插件注册）：
+能力清单位于 `~/.OAgent/capabilities.json`（项目内 `.agent/capabilities.json` 优先），当前共 15 个工具 + skill + MCP：
 
-| 路径 | 能力 | 说明 |
-|---|---|---|
-| `/tool/os/file/read` | `read` | 读取文本文件（截断 20000 字符） |
-| `/tool/os/file/list` | `read` | 列出目录条目（最多 200 条） |
-| `/tool/os/file/write` | `write` | 覆盖写入 |
-| `/tool/os/echo` | `read` | 原样回显，用于连通性测试 |
+| 路径 | 说明 |
+|---|---|
+| `/tool/os/file/read` | 按行读取工作目录内文本文件 |
+| `/tool/os/file/list` | 列出目录条目 |
+| `/tool/os/file/write` | 写入文本文件 |
+| `/tool/os/file/append` | 追加内容到文件 |
+| `/tool/net/http/get` · `post` · `head` | HTTP 请求 |
+| `/tool/memory/work/read` · `append` · `replace` | 读写 `WORK.md` 工作记忆 |
+| `/mcp/workspace/*` | MCP 服务暴露的文件工具（`list_dir` / `read_file` / `search_text` / `stat_path` / `write_file`） |
 
 **安全边界**：所有文件操作都被限制在工作目录内，越界路径抛 `路径越界`。
 
@@ -168,7 +184,7 @@ flowchart LR
 
 | 限制 | 说明 |
 |---|---|
-| 无前端模型切换按钮 | 需调用 `PATCH /api/sessions/{id}` |
-| 无历史会话恢复 | 服务重启后会话丢失（核心 `SessionStore` 已支持，尚未接入） |
+| 无前端模型切换按钮 | 仅提供顶部下拉框，更多参数需 `PATCH /api/sessions/{id}` |
 | 无鉴权 | 仅面向本地开发，默认绑定 `127.0.0.1` |
-| 无流式 token | 事件按「一轮回复」粒度推送，非 token 级流式 |
+| ~~无历史会话恢复~~ **已支持** | 启动时从 SQLite 恢复最近 10 个会话 |
+| ~~无流式 token~~ **已支持** | 事件以 `delta` 逐片段推送，前端实时追加到气泡；提交时以 `assistant` 事件校准 |
