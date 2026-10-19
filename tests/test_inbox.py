@@ -10,7 +10,7 @@ import threading
 
 import pytest
 
-from harness.inbox import (
+from orange.inbox import (
     CHAT_CAPACITY,
     DropNotice,
     Inbox,

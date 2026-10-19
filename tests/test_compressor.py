@@ -9,14 +9,14 @@ from __future__ import annotations
 
 import pytest
 
-from harness.compressor import (
+from orange.compressor import (
     SUMMARY_PREFIX,
     CallRecord,
     compress,
     render_segment,
     split_call_records,
 )
-from harness.message import (
+from orange.message import (
     AssistantMsg,
     Message,
     SystemMsg,
@@ -25,7 +25,7 @@ from harness.message import (
     UserMsg,
     validate_messages,
 )
-from harness.watermark import Watermark
+from orange.watermark import Watermark
 
 
 def _system() -> SystemMsg:

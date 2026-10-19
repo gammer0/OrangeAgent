@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from harness.config import (
+from orange.config import (
     ConfigError,
     LLMConfig,
     build_proxy,

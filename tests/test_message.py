@@ -5,8 +5,8 @@ from __future__ import annotations
 import pytest
 from pydantic import TypeAdapter, ValidationError
 
-from harness.exceptions import MessageInvariantError
-from harness.message import (
+from orange.exceptions import MessageInvariantError
+from orange.message import (
     AssistantMsg,
     Message,
     SystemMsg,

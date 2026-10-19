@@ -2,15 +2,15 @@
 
 from __future__ import annotations
 
-from harness.context import (
+from orange.context import (
     ContextAssembler,
     SystemPromptParts,
     clear_after_compress,
     has_unclosed_tool_calls,
     last_user_text,
 )
-from harness.discovery import TreeSessionState
-from harness.message import AssistantMsg, SystemMsg, ToolCall, ToolMsg, UserMsg, validate_messages
+from orange.discovery import TreeSessionState
+from orange.message import AssistantMsg, SystemMsg, ToolCall, ToolMsg, UserMsg, validate_messages
 
 CAPACITY = 1000
 

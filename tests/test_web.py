@@ -10,9 +10,9 @@ import pytest
 from apps.server import main as web
 from fastapi.testclient import TestClient
 
-from harness.message import AssistantMsg
-from harness.model import ProviderConfig, ReverseProxy
-from harness.rate import RateWindow
+from orange.message import AssistantMsg
+from orange.model import ProviderConfig, ReverseProxy
+from orange.rate import RateWindow
 
 
 class FakeTransport:
@@ -91,7 +91,7 @@ class TestHealthAndStatic:
         assert response.status_code == 200
         assert "<!doctype html>" in response.text.lower()
         # 品牌标识（CSS 用 text-transform 渲染为大写，标记本身可小写）
-        assert "harness" in response.text.lower()
+        assert "orange" in response.text.lower()
 
     def test_health_ok(self, client: TestClient) -> None:
         payload = client.get("/api/health").json()

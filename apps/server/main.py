@@ -1,8 +1,8 @@
-"""FastAPI service layer: REST + SSE, exposing multi-session, model selection and
+﻿"""FastAPI service layer: REST + SSE, exposing multi-session, model selection and
 live inference streaming to the frontend.
 
 **Boundary note**: this directory is the **service layer** and may depend on
-FastAPI; the core ``src/harness`` still keeps zero web-framework dependencies
+FastAPI; the core ``src/orange`` still keeps zero web-framework dependencies
 (enforced by ``scripts/check_constraints.py``).
 
 Start::
@@ -46,10 +46,10 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from apps.server.sessions import SessionManager, SessionRunner
-from harness.capabilities import manifest_path as capability_manifest_path
-from harness.config import ConfigError, build_proxy, load_llm_config
-from harness.defaults import DEFAULT_CONTEXT
-from harness.rate import RateWindow
+from orange.capabilities import manifest_path as capability_manifest_path
+from orange.config import ConfigError, build_proxy, load_llm_config
+from orange.defaults import DEFAULT_CONTEXT
+from orange.rate import RateWindow
 
 APP_DIR = Path(__file__).resolve().parent
 
@@ -57,14 +57,14 @@ APP_DIR = Path(__file__).resolve().parent
 def _static_dir() -> Path:
     """Locate the frontend assets, preferring the copy shipped inside the package.
 
-    The frontend lives in ``harness/web`` so an installed wheel carries it: a
+    The frontend lives in ``orange/web`` so an installed wheel carries it: a
     directory beside this module only exists in a source checkout. Preferring the
     package copy means a pip-installed console and a dev checkout render the same
     UI rather than drifting apart.
     """
-    import harness
+    import orange
 
-    packaged = Path(harness.__file__).resolve().parent / "web"
+    packaged = Path(orange.__file__).resolve().parent / "web"
     if packaged.is_dir():
         return packaged
     return APP_DIR / "static"
@@ -105,7 +105,7 @@ class UpdateSettingsBody(BaseModel):
 
     ``values`` maps ``"group.name"`` to the new value, e.g.
     ``{"loop.max_steps": 60}``. Types are validated against the shipped schema by
-    :mod:`harness.settings`, not here, so the two can never drift apart.
+    :mod:`orange.settings`, not here, so the two can never drift apart.
     """
 
     values: dict[str, Any] = Field(default_factory=dict, description="键值对，如 loop.max_steps")
@@ -186,12 +186,12 @@ def create_app(workdir: str | Path | None = None) -> FastAPI:
         state.manager = None
 
     app = FastAPI(
-        title="Harness Web",
+        title="Orange Web",
         version="0.1.0",
-        description="Harness 服务前端：多会话、模型选择、上下文与实时推理",
+        description="Orange 服务前端：多会话、模型选择、上下文与实时推理",
         lifespan=lifespan,
     )
-    app.state.harness = state
+    app.state.orange = state
 
     if STATIC_DIR.is_dir():
         app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
@@ -265,7 +265,7 @@ def create_app(workdir: str | Path | None = None) -> FastAPI:
         ``overridden`` tells the UI whether a value came from ``settings.json`` or
         is still the shipped default, so it can offer a per-item reset.
         """
-        from harness.settings import effective_config, settings_path
+        from orange.settings import effective_config, settings_path
 
         return {
             "groups": effective_config(),
@@ -281,7 +281,7 @@ def create_app(workdir: str | Path | None = None) -> FastAPI:
         A value marked ``restart_required`` still needs a restart -- the response
         says which ones so the UI can prompt instead of silently lying.
         """
-        from harness.settings import (
+        from orange.settings import (
             RESTART_REQUIRED,
             SettingsError,
             effective_config,
@@ -289,7 +289,9 @@ def create_app(workdir: str | Path | None = None) -> FastAPI:
         )
 
         try:
-            write_overrides(body.values)
+            # ``only_keys`` keeps the UI inside its documented surface; anything
+            # else must go through the CLI, where the change is reviewable.
+            write_overrides(body.values, only_keys=True)
         except SettingsError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -307,7 +309,7 @@ def create_app(workdir: str | Path | None = None) -> FastAPI:
         Args:
             keys: Comma-separated list; omit to reset everything.
         """
-        from harness.settings import clear_overrides, effective_config
+        from orange.settings import clear_overrides, effective_config
 
         targets = [k.strip() for k in keys.split(",")] if keys else None
         clear_overrides(targets)
@@ -372,7 +374,7 @@ def create_app(workdir: str | Path | None = None) -> FastAPI:
         """Send a message and trigger one inference turn."""
         runner = _require(manager_or_503(), session_id)
         if body.channel == "control":
-            from harness.inbox import InterruptRequest, UserInput
+            from orange.inbox import InterruptRequest, UserInput
 
             runner.inbox.put_control(
                 InterruptRequest(reason="user_abort", text=body.text)

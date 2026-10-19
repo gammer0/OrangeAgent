@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from harness.capabilities import (
+from orange.capabilities import (
     CapabilityError,
     CapabilityManifest,
     GroupDef,
@@ -18,14 +18,14 @@ from harness.capabilities import (
     normalize_group,
     save_manifest,
 )
-from harness.mcp_client import McpServerConfig
-from harness.permission import Permission, PermissionDenied, visible
-from harness.permission_store import (
+from orange.mcp_client import McpServerConfig
+from orange.permission import Permission, PermissionDenied, visible
+from orange.permission_store import (
     load_permissions,
     permissions_path,
     set_grant,
 )
-from harness.tool_tree import FlatStore, ToolDef, ToolTree, build_tree
+from orange.tool_tree import FlatStore, ToolDef, ToolTree, build_tree
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -138,7 +138,7 @@ def _load_ext(
         "schema": {"type": "object", "properties": {"text": {"type": "string"}}},
         "source": {"kind": "python", "target": "./ext/hello.py", "callable": "run"},
     }
-    from harness.capabilities import _build_external_tool
+    from orange.capabilities import _build_external_tool
 
     source = SourceSpec(kind="python", target="./ext/hello.py", callable="run")
     manifest.add_tool(_build_external_tool(path, entry, source, str(tmp_path)))
@@ -200,26 +200,26 @@ class TestMcp:
         )
 
     def test_list_tools(self) -> None:
-        from harness.mcp_client import list_tools
+        from orange.mcp_client import list_tools
 
         tools = list_tools(self._config())
         assert [t["name"] for t in tools] == ["echo", "add"]
         assert tools[0]["inputSchema"]["properties"]
 
     def test_call_tool(self) -> None:
-        from harness.mcp_client import call_tool
+        from orange.mcp_client import call_tool
 
         assert call_tool(self._config(), "echo", {"text": "hi"}) == "hi"
         assert call_tool(self._config(), "add", {"a": 2, "b": 5}) == "7"
 
     def test_unknown_tool_errors(self) -> None:
-        from harness.mcp_client import McpError, call_tool
+        from orange.mcp_client import McpError, call_tool
 
         with pytest.raises(McpError):
             call_tool(self._config(), "nope", {})
 
     def test_bad_command_errors(self) -> None:
-        from harness.mcp_client import McpError, McpServerConfig, list_tools
+        from orange.mcp_client import McpError, McpServerConfig, list_tools
 
         bad = McpServerConfig(name="x", command="definitely-not-a-command-xyz")
         with pytest.raises(McpError):
@@ -236,7 +236,7 @@ class TestPermissionStore:
     def _isolated_home(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         """权限文件在系统数据目录（所有项目共享），每个用例必须用独立目录。"""
         home = tmp_path / "home"
-        monkeypatch.setenv("HARNESS_HOME", str(home))
+        monkeypatch.setenv("ORANGE_HOME", str(home))
         return home
 
     def test_default_allows_everything(self, tmp_path: Path) -> None:
@@ -293,7 +293,7 @@ class TestPermissionBlocksTree:
     """权限必须真实屏蔽：查询不可见 + 调用被拒。"""
 
     def _tree(self, tmp_path: Path, grants: dict[str, bool]) -> ToolTree:
-        from harness.permission import AgentPermissions
+        from orange.permission import AgentPermissions
 
         manifest = CapabilityManifest()
         _load_ext(manifest, tmp_path, "/tool/ext/hello")
@@ -333,7 +333,7 @@ class TestGroupLevelDenial:
         用测试自带的假工具而不是内置工具：本部署不随包发布任何内置工具，
         但分组级禁用是纯粹的权限逻辑，不应依赖具体工具是否存在。
         """
-        from harness.permission import AgentPermissions
+        from orange.permission import AgentPermissions
 
         manifest = CapabilityManifest()
         for path in (
@@ -391,9 +391,9 @@ class TestGroupLevelDenial:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """分组拒绝必须能落盘并重新读回。"""
-        from harness.permission_store import load_permissions, set_grant
+        from orange.permission_store import load_permissions, set_grant
 
-        monkeypatch.setenv("HARNESS_HOME", str(tmp_path / "home"))
+        monkeypatch.setenv("ORANGE_HOME", str(tmp_path / "home"))
         set_grant(tmp_path, "/tool/net", allowed=False, agent_id="local")
 
         perms = load_permissions(tmp_path, "local")

@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from harness.memory import (
+from orange.memory import (
     LONG_TERM_MEMORY_FILENAME,
     WORK_MEMORY_FILENAME,
     MemoryEntry,
@@ -23,7 +23,7 @@ from harness.memory import (
     work_memory_path,
     write_working_memory_atomic,
 )
-from harness.paths import harness_home
+from orange.paths import orange_home
 
 # ------------------------------------------------------------------ 工作记忆
 
@@ -35,7 +35,7 @@ class TestWorkingMemory:
         assert WORK_MEMORY_FILENAME == "WORK.md"
         # 不在子目录里，也与全局数据目录无关
         assert work_memory_path(tmp_path).parent == tmp_path
-        assert work_memory_path(tmp_path).parent != harness_home()
+        assert work_memory_path(tmp_path).parent != orange_home()
 
     def test_c1_freeform_text_roundtrip_verbatim(self, tmp_path: Path) -> None:
         text = "# 标题\n\n- 条目一\n  - 缩进\n\n任意格式 **不解析**\n"
@@ -102,9 +102,9 @@ class TestProjectMemory:
     def test_c7_paths_are_global_constants(self, tmp_path: Path) -> None:
         a = long_term_memory_path(tmp_path)
         b = long_term_memory_path(tmp_path)
-        assert a == b == harness_home() / "MEMORY.md"
+        assert a == b == orange_home() / "MEMORY.md"
         assert LONG_TERM_MEMORY_FILENAME == "MEMORY.md"
-        assert extract_principle_path(tmp_path) == harness_home() / "extract.md"
+        assert extract_principle_path(tmp_path) == orange_home() / "extract.md"
         # 不随工作目录变化（C7）
         assert long_term_memory_path(Path("/elsewhere")) == a
 

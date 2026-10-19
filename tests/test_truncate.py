@@ -9,7 +9,7 @@ import re
 
 import pytest
 
-from harness.truncate import truncate_result
+from orange.truncate import truncate_result
 
 _OMITTED = re.compile(r"\[\.\.\. (\d+) 字符已省略 \.\.\.\]")
 #: 4000 额度下省略提示的完整形态（含数字 6024）

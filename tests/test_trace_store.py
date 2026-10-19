@@ -11,12 +11,12 @@ from __future__ import annotations
 
 import json
 
-from harness.session import SessionRecord
-from harness.session_store import SessionStore
+from orange.session import SessionRecord
+from orange.session_store import SessionStore
 
 
 def _store(tmp_path) -> SessionStore:  # noqa: ANN001
-    return SessionStore(db_path=tmp_path / "harness.db")
+    return SessionStore(db_path=tmp_path / "orange.db")
 
 
 def _record(session_id: str) -> SessionRecord:
@@ -88,7 +88,7 @@ def test_trace_survives_a_fresh_connection(tmp_path) -> None:  # noqa: ANN001
     first.append_trace_events("s1", [("tool", {"path": "/tool/os"}, 1.0)])
     first.close()
 
-    second = SessionStore(db_path=tmp_path / "harness.db")
+    second = SessionStore(db_path=tmp_path / "orange.db")
     rows = second.load_trace_events("s1")
     assert len(rows) == 1
     assert json.loads(rows[0].payload)["path"] == "/tool/os"
@@ -105,7 +105,7 @@ def test_descent_absent_from_messages_but_present_in_trace(tmp_path) -> None:  #
     store.upsert_session(_record("s1"))
 
     # What the conversation holds after pruning: the leaf call and its result.
-    from harness.message import AssistantMsg, ToolCall, ToolMsg, UserMsg
+    from orange.message import AssistantMsg, ToolCall, ToolMsg, UserMsg
 
     leaf = ToolCall(id="c2", name="/tool/os/file/read", arguments='{"path":"a"}')
     store.append_messages(

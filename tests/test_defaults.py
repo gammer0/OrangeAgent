@@ -1,6 +1,6 @@
-"""默认配置一致性测试。
+﻿"""默认配置一致性测试。
 
-确保 ``harness.defaults`` 与各模块实际常量、以及文档清单三方一致，
+确保 ``orange.defaults`` 与各模块实际常量、以及文档清单三方一致，
 避免"文档写一套、代码跑另一套"。
 """
 
@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from harness import (
+from orange import (
     compressor,
     executor,
     inbox,
@@ -22,7 +22,7 @@ from harness import (
     truncate,
     watermark,
 )
-from harness.defaults import (
+from orange.defaults import (
     DEFAULT_CONTEXT,
     DEFAULT_EXECUTION,
     DEFAULT_LOOP,
@@ -78,7 +78,7 @@ class TestMatchesModuleConstants:
         assert DEFAULT_MEMORY.trace_dir == trace.TRACE_DIR_NAME
 
     def test_rate_defaults_match_provider_health(self) -> None:
-        from harness.rate import ProviderHealth
+        from orange.rate import ProviderHealth
 
         health = ProviderHealth(provider="p")
         assert DEFAULT_RATE.failure_threshold == health.failure_threshold

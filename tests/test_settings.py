@@ -13,7 +13,8 @@ from pathlib import Path
 
 import pytest
 
-from harness.settings import (
+from orange.settings import (
+    KEY_SETTINGS,
     RESTART_REQUIRED,
     SettingsError,
     clear_overrides,
@@ -135,6 +136,31 @@ def test_effective_config_marks_overrides(home: Path) -> None:
     assert entry["value"] == 55
     assert entry["default"] == 40
     assert entry["overridden"] is True
+
+
+def test_effective_config_hides_internal_keys_by_default(home: Path) -> None:
+    """界面只看关键项；其余交给 CLI。"""
+    groups = effective_config(home)
+    keys = {item["key"] for items in groups.values() for item in items}
+    assert keys == set(KEY_SETTINGS)
+    assert "memory.trace_dir" not in keys
+    assert "rate.window_s" not in keys
+
+
+def test_full_schema_still_available(home: Path) -> None:
+    groups = effective_config(home, only_keys=False)
+    keys = {item["key"] for items in groups.values() for item in items}
+    assert "memory.trace_dir" in keys
+    assert len(keys) > len(KEY_SETTINGS)
+
+
+def test_ui_cannot_write_hidden_keys(home: Path) -> None:
+    """界面层写入超出白名单的项必须被拒绝，并指向 CLI。"""
+    with pytest.raises(SettingsError, match="CLI"):
+        write_overrides({"memory.trace_dir": "t2"}, home, only_keys=True)
+    # The CLI path may still set it.
+    write_overrides({"memory.trace_dir": "t2"}, home)
+    assert read_overrides(home)["memory.trace_dir"] == "t2"
 
 
 def test_atomic_write_leaves_no_temp_file(home: Path) -> None:

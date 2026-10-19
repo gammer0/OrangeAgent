@@ -13,8 +13,8 @@ from pathlib import Path
 
 from apps.server.sessions import DemoToolRegistry, SessionRunner
 
-from harness.session import SessionRecord
-from harness.session_store import SessionStore
+from orange.session import SessionRecord
+from orange.session_store import SessionStore
 
 
 def _runner(tmp_path: Path, session_id: str) -> SessionRunner:
@@ -26,7 +26,7 @@ def _runner(tmp_path: Path, session_id: str) -> SessionRunner:
         tools=tools,
         model="fake",
     )
-    runner.store = SessionStore(db_path=tmp_path / "harness.db")
+    runner.store = SessionStore(db_path=tmp_path / "orange.db")
     runner.store.upsert_session(
         SessionRecord(
             session_id=session_id,

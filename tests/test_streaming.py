@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from harness.model import (
+from orange.model import (
     OpenAIAdapter,
     ReverseProxy,
     StreamAccumulator,
@@ -118,7 +118,7 @@ class _StreamingTransport:
 
 
 def _proxy(transport: Any) -> ReverseProxy:
-    from harness.model import ProviderConfig, ProviderHealth, RateWindow
+    from orange.model import ProviderConfig, ProviderHealth, RateWindow
 
     provider = ProviderConfig(
         name="fake",
@@ -176,7 +176,7 @@ def test_sse_frames_are_decoded_despite_json_parameter_shadowing() -> None:
     ``'dict' object has no attribute 'loads'``——流式完全不可用，而普通路径
     因为不解析 SSE 帧毫无察觉。
     """
-    from harness.model import OpenAITransport
+    from orange.model import OpenAITransport
 
     frames = [
         'data: {"choices":[{"delta":{"content":"流"}}]}',

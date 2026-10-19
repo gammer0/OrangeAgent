@@ -6,8 +6,8 @@
 
 from __future__ import annotations
 
-from harness.context import ContextAssembler
-from harness.message import AssistantMsg, SystemMsg, ToolCall, ToolMsg, UserMsg
+from orange.context import ContextAssembler
+from orange.message import AssistantMsg, SystemMsg, ToolCall, ToolMsg, UserMsg
 
 CAPACITY = 4_000
 

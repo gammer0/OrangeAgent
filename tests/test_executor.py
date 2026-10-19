@@ -10,14 +10,14 @@ from typing import Any
 
 import pytest
 
-from harness.execution import (
+from orange.execution import (
     BatchPlan,
     ExecResult,
     fill_placeholders,
     plan_batch,
 )
-from harness.executor import Committed, GroupReport, execute_batch
-from harness.message import ToolCall
+from orange.executor import Committed, GroupReport, execute_batch
+from orange.message import ToolCall
 
 SAFE = "/tool/os/file/read"
 EXCL = "/tool/os/shell/run"

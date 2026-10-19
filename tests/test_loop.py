@@ -10,11 +10,11 @@ from typing import Any
 
 import pytest
 
-from harness.exceptions import MessageInvariantError
-from harness.execution import ExecResult
-from harness.inbox import Inbox, InterruptRequest, UserInput
-from harness.loop import AgentLoop, DeadlockTracker, LoopHooks, StepController
-from harness.message import AssistantMsg, SystemMsg, ToolCall, ToolMsg, UserMsg, validate_messages
+from orange.exceptions import MessageInvariantError
+from orange.execution import ExecResult
+from orange.inbox import Inbox, InterruptRequest, UserInput
+from orange.loop import AgentLoop, DeadlockTracker, LoopHooks, StepController
+from orange.message import AssistantMsg, SystemMsg, ToolCall, ToolMsg, UserMsg, validate_messages
 
 SYS = SystemMsg(content="sys")
 
@@ -61,7 +61,7 @@ class FakeExecutor:
                 results[call.id] = ExecResult(ok=True, content=f"ok:{call.id}", duration_ms=0)
             if on_group_done is not None:
                 report = type("R", (), {"index": group.index, "group": group, "results": results})()
-                from harness.executor import GroupReport
+                from orange.executor import GroupReport
 
                 hook_result = on_group_done(
                     GroupReport(
@@ -258,7 +258,7 @@ class TestLoopBehaviour:
                     for call in plan.calls
                 }
                 if on_group_done is not None:
-                    from harness.executor import GroupReport
+                    from orange.executor import GroupReport
 
                     for group in plan.groups:
                         on_group_done(

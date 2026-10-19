@@ -14,15 +14,15 @@ import threading
 
 import pytest
 
-from harness.discovery import (
+from orange.discovery import (
     DEFAULT_MAX_DISCOVERED,
     DiscoveredTools,
     ToolDiscovery,
     TreeQueryState,
     TreeSessionState,
 )
-from harness.permission import AgentPermissions, Permission
-from harness.tool_tree import EMPTY_SCHEMA, FlatStore, ToolDef, build_tree, tree_query
+from orange.permission import AgentPermissions, Permission
+from orange.tool_tree import EMPTY_SCHEMA, FlatStore, ToolDef, build_tree, tree_query
 
 
 def _store() -> FlatStore:
@@ -323,7 +323,7 @@ class TestProjection:
         ]
 
     def test_projection_is_usable_by_to_provider_3_7(self, tree) -> None:
-        from harness.message import SystemMsg, UserMsg, to_provider
+        from orange.message import SystemMsg, UserMsg, to_provider
 
         state = TreeSessionState()
         tree_query("/skill/mmd", tree=tree, state=state, step=1)

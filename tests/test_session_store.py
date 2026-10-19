@@ -10,8 +10,8 @@ import threading
 
 import pytest
 
-from harness.exceptions import MessageInvariantError
-from harness.message import (
+from orange.exceptions import MessageInvariantError
+from orange.message import (
     AssistantMsg,
     SystemMsg,
     ToolCall,
@@ -19,9 +19,9 @@ from harness.message import (
     UserMsg,
     validate_messages,
 )
-from harness.session import SessionRecord, Watermark
-from harness.paths import harness_home
-from harness.session_store import DB_RELATIVE_PATH, SessionStore
+from orange.paths import orange_home
+from orange.session import SessionRecord, Watermark
+from orange.session_store import DB_RELATIVE_PATH, SessionStore
 
 
 def _record(sid: str = "s1", workdir: str = "w", status: str = "idle") -> SessionRecord:
@@ -41,7 +41,7 @@ def _call(call_id: str = "c1", name: str = "/tool/os/file/read") -> ToolCall:
 
 @pytest.fixture
 def store(tmp_path):
-    s = SessionStore(db_path=tmp_path / "harness.db")
+    s = SessionStore(db_path=tmp_path / "orange.db")
     s.upsert_session(_record(workdir=str(tmp_path)))
     yield s
     s.close()
@@ -52,7 +52,7 @@ class TestDatabaseSetup:
         """数据库不得写进工作目录：默认落在系统数据目录。"""
         store = SessionStore(tmp_path)
         store.upsert_session(_record())
-        assert store.db_path == harness_home() / DB_RELATIVE_PATH
+        assert store.db_path == orange_home() / DB_RELATIVE_PATH
         assert store.db_path.is_file()
         assert not (tmp_path / ".agent").exists()
         store.close()

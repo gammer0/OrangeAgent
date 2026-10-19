@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from harness.cli import build_parser, main
+from orange.cli import build_parser, main
 
 
 def _run(argv: list[str], capsys: pytest.CaptureFixture[str]) -> tuple[int, str]:

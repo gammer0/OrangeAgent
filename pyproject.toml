@@ -1,5 +1,5 @@
 [project]
-name = "harness"
+name = "orange"
 version = "0.1.0"
 requires-python = ">=3.12"
 dependencies = [
@@ -23,12 +23,12 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project.scripts]
-harness = "harness.cli:main"
+orange = "orange.cli:main"
 
 [tool.hatch.build.targets.wheel]
-# ``apps`` carries the FastAPI layer; ``src/harness/web`` is inside the harness
+# ``apps`` carries the FastAPI layer; ``src/orange/web`` sits inside the orange
 # package already, so it ships automatically with the wheel.
-packages = ["src/harness", "apps"]
+packages = ["src/orange", "apps"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

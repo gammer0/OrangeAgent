@@ -3,7 +3,7 @@
 关键约束：**只在缺失时创建，绝不覆盖已有内容**——工作记忆跨会话共享，
 覆盖等于抹掉别的会话刚写下的结论。
 
-另：数据目录不在用户工作目录内，见 ``harness.paths``。
+另：数据目录不在用户工作目录内，见 ``orange.paths``。
 """
 
 from __future__ import annotations
@@ -12,14 +12,13 @@ from pathlib import Path
 
 import pytest
 
-from harness.memory import (
+from orange.memory import (
     WORK_MEMORY_TEMPLATE,
     ensure_working_memory,
     read_working_memory,
     work_memory_path,
 )
-from harness.paths import harness_home
-from harness.service import build_service
+from orange.service import build_service
 
 
 class TestEnsureWorkingMemory:
@@ -110,7 +109,7 @@ class TestServiceIntegration:
             assert (tmp_path / "WORK.md").is_file()
             # 不建 .agent，且全局数据（数据库等）也不落在项目里
             assert not (tmp_path / ".agent").exists()
-            assert not (tmp_path / "harness.db").exists()
+            assert not (tmp_path / "orange.db").exists()
         finally:
             service.close()
 
@@ -145,7 +144,7 @@ class TestServiceIntegration:
         def boom(*args: object, **kwargs: object) -> None:
             raise OSError("模拟权限错误")
 
-        monkeypatch.setattr("harness.service.ensure_working_memory", boom)
+        monkeypatch.setattr("orange.service.ensure_working_memory", boom)
         service = build_service(tmp_path, load_model=False)
         try:
             assert service.work_memory is None

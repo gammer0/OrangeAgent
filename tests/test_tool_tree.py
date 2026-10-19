@@ -9,9 +9,9 @@ import threading
 
 import pytest
 
-from harness.discovery import DiscoveredTools, ToolDiscovery, TreeQueryState, TreeSessionState
-from harness.permission import AgentPermissions, Permission, PermissionDenied
-from harness.tool_tree import (
+from orange.discovery import DiscoveredTools, ToolDiscovery, TreeQueryState, TreeSessionState
+from orange.permission import AgentPermissions, Permission, PermissionDenied
+from orange.tool_tree import (
     EMPTY_SCHEMA,
     FlatStore,
     ToolDef,
@@ -136,13 +136,13 @@ class TestKindDerivation:
         assert tree.get_node("/skill/mmd/pose/set_keyframe").kind == "leaf"  # type: ignore[union-attr]
 
     def test_kind_is_not_a_constructor_field_B21(self, store: FlatStore, perms) -> None:
-        from harness.tool_tree import ToolNode
+        from orange.tool_tree import ToolNode
 
         with pytest.raises(TypeError):
             ToolNode(path="/skill/x", name="x", kind="leaf")  # type: ignore[call-arg]
 
     def test_kind_flips_when_child_added_B21(self) -> None:
-        from harness.tool_tree import ToolNode
+        from orange.tool_tree import ToolNode
 
         node = ToolNode(path="/skill/x", name="x")
         assert node.kind == "leaf"
@@ -245,10 +245,10 @@ class TestBuildValidation:
         tree = build_tree(flat, AgentPermissions(agent_id="a"))
         os_node = tree.get_node("/tool/os")
         assert os_node is not None
-        from harness.tool_tree import ToolNode
+        from orange.tool_tree import ToolNode
 
         os_node.add_child(ToolNode(path="/tool/os/read", name="read", tool_id="t1"))
-        from harness.tool_tree import _validate_tree
+        from orange.tool_tree import _validate_tree
 
         with pytest.raises(ToolTreeError) as exc:
             _validate_tree(tree, flat, {})
@@ -278,7 +278,7 @@ class TestBuildValidation:
         node = tree.get_node("/skill/mmd/pose/set_keyframe")
         assert node is not None
         node.tool_id = "t_missing"
-        from harness.tool_tree import _validate_tree
+        from orange.tool_tree import _validate_tree
 
         with pytest.raises(ToolTreeError) as exc:
             _validate_tree(tree, store, tree.synthetic_entries)
@@ -289,7 +289,7 @@ class TestBuildValidation:
         node = tree.get_node("/skill/mmd/pose/set_keyframe")
         assert node is not None
         node.schema = {"type": "object", "properties": {"other": {"type": "string"}}}
-        from harness.tool_tree import _validate_tree
+        from orange.tool_tree import _validate_tree
 
         with pytest.raises(ToolTreeError) as exc:
             _validate_tree(tree, store, tree.synthetic_entries)
@@ -300,7 +300,7 @@ class TestBuildValidation:
         node = tree.get_node("/skill/mmd/pose")
         assert node is not None
         node.schema = {"type": "object", "properties": {"x": {"type": "string"}}}
-        from harness.tool_tree import _validate_tree
+        from orange.tool_tree import _validate_tree
 
         with pytest.raises(ToolTreeError) as exc:
             _validate_tree(tree, store, tree.synthetic_entries)
@@ -408,7 +408,7 @@ class TestTreeIndex:
 
     def test_index_omits_undescribed_groups(self, store: FlatStore, perms) -> None:
         """无描述的中间节点只是子路径前缀的重复，必须省略。"""
-        from harness.tool_tree import index_text_to_paths
+        from orange.tool_tree import index_text_to_paths
 
         tree = build_tree(store, perms)
         shown = set(index_text_to_paths(tree.tree_index()))
@@ -427,7 +427,7 @@ class TestTreeIndex:
 
     def test_index_shows_described_groups(self, store: FlatStore, perms) -> None:
         """有描述的分组才出现，且带上描述。"""
-        from harness.tool_tree import index_text_to_paths
+        from orange.tool_tree import index_text_to_paths
 
         tree = build_tree(store, perms, group_descriptions={"skill/mmd": "MMD 骨骼"})
         text = tree.tree_index()
@@ -441,7 +441,7 @@ class TestTreeIndex:
 
     def test_index_depth_one_only_l1(self, store: FlatStore, perms) -> None:
         """``depth=1`` 只列 L1（提示行不算条目）。"""
-        from harness.tool_tree import index_text_to_paths
+        from orange.tool_tree import index_text_to_paths
 
         tree = build_tree(store, perms)
         text = tree.tree_index(depth=1)
@@ -484,7 +484,7 @@ class TestTreeIndex:
 
     def test_index_sorted_by_path_B6(self, store: FlatStore, perms) -> None:
         tree = build_tree(store, perms)
-        from harness.tool_tree import index_text_to_paths
+        from orange.tool_tree import index_text_to_paths
 
         paths = index_text_to_paths(tree.tree_index())
         assert paths == sorted(paths)
@@ -500,7 +500,7 @@ class TestTreeIndex:
         会漏掉 21 个，模型永远不知道它们存在。分组规模本身不会那么大，
         与其加一层极易出错的折叠，不如不设上限。
         """
-        from harness.tool_tree import index_text_to_paths
+        from orange.tool_tree import index_text_to_paths
 
         total = 200
         entries = [
@@ -544,7 +544,7 @@ class TestTreeQuery:
             tree_query("/skill/mmd", tree=tree)
 
     def test_direct_call_on_denied_node_returns_3a_B5(self, store: FlatStore) -> None:
-        from harness.permission import PermissionDenied as Denied
+        from orange.permission import PermissionDenied as Denied
 
         perms = AgentPermissions(agent_id="a", grants={"/skill/mmd/pose/set_keyframe": False})
         tree = build_tree(store, perms)

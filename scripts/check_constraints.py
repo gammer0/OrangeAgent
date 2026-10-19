@@ -22,7 +22,7 @@ import tomllib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-SRC = ROOT / "src" / "harness"
+SRC = ROOT / "src" / "orange"
 TESTS = ROOT / "tests"
 DOCS = ROOT / "docs"
 APPS = ROOT / "apps"

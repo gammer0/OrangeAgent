@@ -6,9 +6,9 @@
 
 from __future__ import annotations
 
-from harness.execution import plan_batch
-from harness.executor import execute_batch
-from harness.message import ToolCall
+from orange.execution import plan_batch
+from orange.executor import execute_batch
+from orange.message import ToolCall
 
 
 class _BigTool:
@@ -30,7 +30,10 @@ class _SmallTool:
 
 
 def _run(tool: object, call_id: str = "c1") -> str:
-    plan = plan_batch([ToolCall(id=call_id, name="/tool/fake/x", arguments="{}")], lambda _n: "safe")
+    plan = plan_batch(
+        [ToolCall(id=call_id, name="/tool/fake/x", arguments="{}")],
+        lambda _n: "safe",
+    )
     return execute_batch(plan, lambda _c: tool)[call_id].content
 
 

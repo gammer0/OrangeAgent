@@ -6,7 +6,7 @@ import json
 
 import pytest
 
-from harness.capabilities import (
+from orange.capabilities import (
     MANIFEST_VERSION,
     CapabilityError,
     CapabilityManifest,
@@ -16,8 +16,8 @@ from harness.capabilities import (
     save_manifest,
     write_skill_files,
 )
-from harness.permission import Permission
-from harness.tool_tree import ToolDef
+from orange.permission import Permission
+from orange.tool_tree import ToolDef
 
 
 def _fake_tool(path: str, caps: list[str] | None = None) -> ToolDef:
@@ -49,7 +49,7 @@ def test_manifest_roundtrip(tmp_path):
     工具用外来 Python 源，这样重新读回清单时能被真实重建——本部署不随包
     发布内置工具，但「清单往返后工具仍可执行」这一保证必须成立。
     """
-    from harness.capabilities import SourceSpec, _build_external_tool
+    from orange.capabilities import SourceSpec, _build_external_tool
 
     ext = tmp_path / "ext"
     ext.mkdir(parents=True, exist_ok=True)
@@ -89,9 +89,11 @@ def test_manifest_file_is_readable_json(tmp_path):
 
 def test_duplicate_path_rejected(tmp_path):
     """同一路径不得重复挂载（B1）。"""
+    from orange.tool_tree import ToolTreeError
+
     manifest = CapabilityManifest()
     manifest.add_tool(_fake_tool("/tool/os/echo"))
-    with pytest.raises(Exception):
+    with pytest.raises(ToolTreeError):
         manifest.add_tool(_fake_tool("/tool/os/echo"))
 
 
@@ -107,7 +109,7 @@ def test_skill_path_collides_with_same_name(tmp_path):
     """skill 路径与已有条目冲突时拒绝。"""
     manifest = CapabilityManifest()
     manifest.add_skill(SkillDef(name="x", description="a"))
-    with pytest.raises(Exception):
+    with pytest.raises(CapabilityError):
         manifest.add_skill(SkillDef(name="x", description="b", source="other"))
 
 

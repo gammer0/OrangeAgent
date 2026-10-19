@@ -6,8 +6,8 @@ from typing import Any
 
 import pytest
 
-from harness.message import AssistantMsg, SystemMsg, ToolCall, ToolMsg, UserMsg
-from harness.model import (
+from orange.message import AssistantMsg, SystemMsg, ToolCall, ToolMsg, UserMsg
+from orange.model import (
     AnthropicAdapter,
     ModelError,
     OpenAIAdapter,
@@ -15,7 +15,7 @@ from harness.model import (
     RateLimitError,
     ReverseProxy,
 )
-from harness.rate import ProviderHealth, RateWindow
+from orange.rate import ProviderHealth, RateWindow
 
 SYS = SystemMsg(content="sys")
 USER = UserMsg(content="读文件")

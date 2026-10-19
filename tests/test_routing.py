@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from harness.routing import RouteDecision
+from orange.routing import RouteDecision
 
 
 class TestRouteDecision:

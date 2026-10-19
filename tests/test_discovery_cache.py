@@ -13,7 +13,7 @@ from pathlib import Path
 
 from apps.server.sessions import SessionRunner
 
-from harness.tool_tree import FlatStore, build_tree
+from orange.tool_tree import FlatStore, build_tree
 
 
 def _runner(tmp_path: Path) -> tuple[SessionRunner, object]:
@@ -126,7 +126,7 @@ class TestDescentNotPersisted:
     def _runner_with_store(self, tmp_path: Path) -> tuple[SessionRunner, object]:
         from apps.server.sessions import DemoToolRegistry
 
-        from harness.session_store import SessionStore
+        from orange.session_store import SessionStore
 
         tools = DemoToolRegistry(str(tmp_path))
         runner = SessionRunner(
@@ -139,7 +139,7 @@ class TestDescentNotPersisted:
         )
         store = SessionStore(str(tmp_path))
         store.upsert_session(
-            __import__("harness.session", fromlist=["SessionRecord"]).SessionRecord(
+            __import__("orange.session", fromlist=["SessionRecord"]).SessionRecord(
                 session_id="persist",
                 working_dir=str(tmp_path),
                 created_at=1.0,
@@ -157,7 +157,7 @@ class TestDescentNotPersisted:
         清理时机由 ``AgentLoop._prune_resolved_descents`` 控制（选到具体工具后
         才删），因此到了 flush 阶段，历史里剩下的就是最终轨迹。
         """
-        from harness.message import AssistantMsg, ToolCall, ToolMsg, UserMsg
+        from orange.message import AssistantMsg, ToolCall, ToolMsg, UserMsg
 
         runner, store = self._runner_with_store(tmp_path)
 
@@ -183,11 +183,11 @@ class TestDescentNotPersisted:
 
     def test_pruned_history_persists_without_descents(self, tmp_path: Path) -> None:
         """loop 清理后的历史落盘时不含下钻，只留真实调用。"""
-        from harness.message import AssistantMsg, ToolCall, ToolMsg, UserMsg
+        from orange.message import AssistantMsg, ToolCall, ToolMsg, UserMsg
 
         runner, store = self._runner_with_store(tmp_path)
 
-        descent = ToolCall(id="d1", name="/tool", arguments="{}")
+        ToolCall(id="d1", name="/tool", arguments="{}")
         real = ToolCall(id="r1", name="/tool/os/file/read", arguments='{"path":"a"}')
 
         # 模拟 loop 已经清理：下钻那一对已从历史移除
@@ -212,9 +212,9 @@ class TestTreeMatchesCacheRule:
     """
 
     def _tree(self, tmp_path: Path) -> object:
-        from harness.capabilities import CapabilityManifest
-        from harness.permission import Permission
-        from harness.tool_tree import ToolDef
+        from orange.capabilities import CapabilityManifest
+        from orange.permission import Permission
+        from orange.tool_tree import ToolDef
 
         def leaf(path: str) -> ToolDef:
             return ToolDef(

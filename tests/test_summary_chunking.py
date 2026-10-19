@@ -1,4 +1,4 @@
-"""分块压缩回归测试：超长输入必须分块处理，不得硬截断丢数据。
+﻿"""分块压缩回归测试：超长输入必须分块处理，不得硬截断丢数据。
 
 历史问题：``_summarize`` 用 ``text[:24000]`` 直接截断，超出部分静默丢失。
 现改为按 SUMMARY_INPUT_CHARS 切块逐块压缩，再合并。
@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "apps" / ".."))
@@ -31,7 +32,7 @@ class _FakeProxy:
     def __init__(self) -> None:
         self.inputs: list[str] = []
 
-    def chat(self, messages, **kwargs):  # noqa: ANN001, ANN003
+    def chat(self, messages, **kwargs) -> Any:  # noqa: ANN001, ANN003
         payload = messages[-1].content
         self.inputs.append(payload)
         return _FakeResponse(f"[摘要{len(self.inputs)}] 共 {len(payload)} 字符")

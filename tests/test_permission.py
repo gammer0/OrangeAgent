@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import pytest
 
-from harness.permission import (
+from orange.permission import (
     AgentIdentity,
     AgentPermissions,
     Permission,
@@ -18,7 +18,7 @@ from harness.permission import (
     path_segments,
     visible,
 )
-from harness.tool_tree import EMPTY_SCHEMA, FlatStore, ToolDef, build_tree, tree_query
+from orange.tool_tree import EMPTY_SCHEMA, FlatStore, ToolDef, build_tree, tree_query
 
 
 class TestNoRecordMeansAllow:

@@ -10,14 +10,14 @@ import json
 import pytest
 from pydantic import ValidationError
 
-from harness.execution import (
+from orange.execution import (
     BatchPlan,
     ExecGroup,
     ExecResult,
     fill_placeholders,
     plan_batch,
 )
-from harness.message import ToolCall
+from orange.message import ToolCall
 
 SAFE = "/tool/os/file/read"
 EXCL = "/tool/os/shell/run"

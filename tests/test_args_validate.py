@@ -10,13 +10,13 @@ from typing import Any, Protocol
 
 import pytest
 
-from harness.args_validate import (
+from orange.args_validate import (
     ArgumentValidation,
     parse_call_arguments,
     validate_arguments,
 )
-from harness.execution import ExecResult
-from harness.message import ToolCall
+from orange.execution import ExecResult
+from orange.message import ToolCall
 
 SCHEMA: dict[str, Any] = {
     "type": "object",

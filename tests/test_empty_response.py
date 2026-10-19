@@ -1,4 +1,4 @@
-"""空回复处理回归测试。
+﻿"""空回复处理回归测试。
 
 历史问题：模型返回 ``content=""`` + 无 tool_calls 时，
 ``is_final`` 只看 tool_calls 为空，被误判为完成，任务被静默截断。
@@ -7,8 +7,8 @@
 
 from __future__ import annotations
 
-from harness.loop import AgentLoop, StepController
-from harness.message import AssistantMsg, SystemMsg
+from orange.loop import AgentLoop, StepController
+from orange.message import AssistantMsg, SystemMsg
 
 
 class _EmptyModel:
@@ -17,7 +17,7 @@ class _EmptyModel:
     def __init__(self) -> None:
         self.calls = 0
 
-    def chat(self, messages):  # noqa: ANN001, ANN201
+    def chat(self, messages) -> AssistantMsg:  # noqa: ANN001
         self.calls += 1
         return AssistantMsg(content="", tool_calls=[])
 
@@ -25,14 +25,14 @@ class _EmptyModel:
 class _FinalModel:
     """返回正常最终答案的假模型。"""
 
-    def chat(self, messages):  # noqa: ANN001, ANN201
+    def chat(self, messages) -> AssistantMsg:  # noqa: ANN001
         return AssistantMsg(content="完成", tool_calls=[])
 
 
 def _loop(model) -> AgentLoop:  # noqa: ANN001
     return AgentLoop(
         model=model,
-        inbox=__import__("harness.inbox", fromlist=["Inbox"]).Inbox(),
+        inbox=__import__("orange.inbox", fromlist=["Inbox"]).Inbox(),
         executor=lambda plan, resolver, on_group_done=None, **kw: {},
         resolver=lambda call: None,
         system_msg=SystemMsg(content="sys"),

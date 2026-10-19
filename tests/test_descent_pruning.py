@@ -11,8 +11,8 @@ from __future__ import annotations
 
 from typing import Never
 
-from harness.loop import AgentLoop
-from harness.message import AssistantMsg, SystemMsg, ToolCall, ToolMsg, UserMsg
+from orange.loop import AgentLoop
+from orange.message import AssistantMsg, SystemMsg, ToolCall, ToolMsg, UserMsg
 
 
 class _Model:

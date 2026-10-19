@@ -19,7 +19,7 @@
 2. ``OpenAIAdapter`` 把内部消息投影成请求体，``ReverseProxy`` 负责限流与重试；
 3. ``JevRouter`` 由主模型代为选择工具分支，失败即回退全量。
 
-密钥只从环境变量读取（见 ``harness.config``），不写入代码、不打印明文。
+密钥只从环境变量读取（见 ``orange.config``），不写入代码、不打印明文。
 """
 
 from __future__ import annotations
@@ -29,17 +29,17 @@ import sys
 from dataclasses import replace
 from typing import Any
 
-from harness.config import ConfigError, build_proxy, load_llm_config
-from harness.context import ContextAssembler, SystemPromptParts, clear_after_compress
-from harness.discovery import TreeSessionState
-from harness.execution import ExecResult
-from harness.executor import GroupReport
-from harness.inbox import Inbox
-from harness.jev import JevRouter
-from harness.loop import AgentLoop, StepController
-from harness.message import Message, ToolCall, UserMsg
-from harness.model import OpenAIAdapter, ProviderConfig, ReverseProxy
-from harness.rate import RateWindow
+from orange.config import ConfigError, build_proxy, load_llm_config
+from orange.context import ContextAssembler, SystemPromptParts, clear_after_compress
+from orange.discovery import TreeSessionState
+from orange.execution import ExecResult
+from orange.executor import GroupReport
+from orange.inbox import Inbox
+from orange.jev import JevRouter
+from orange.loop import AgentLoop, StepController
+from orange.message import Message, ToolCall, UserMsg
+from orange.model import OpenAIAdapter, ProviderConfig, ReverseProxy
+from orange.rate import RateWindow
 
 # ---------------------------------------------------------------------------
 # 1) 工具目录（真实场景来自 FlatStore + build_tree）
@@ -207,7 +207,7 @@ def build_real_proxy(model_override: str | None) -> ReverseProxy:
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     """解析命令行参数。"""
-    parser = argparse.ArgumentParser(description="Harness 端到端接线示例")
+    parser = argparse.ArgumentParser(description="Orange 端到端接线示例")
     parser.add_argument(
         "--dry-run", action="store_true", help="使用假传输离线演练，不发真实请求"
     )

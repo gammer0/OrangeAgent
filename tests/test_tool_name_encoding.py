@@ -9,8 +9,8 @@ from __future__ import annotations
 
 import pytest
 
-from harness.message import SystemMsg
-from harness.model import (
+from orange.message import SystemMsg
+from orange.model import (
     AnthropicAdapter,
     OpenAIAdapter,
     decode_tool_name,

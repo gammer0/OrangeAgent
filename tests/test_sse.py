@@ -19,10 +19,10 @@ from typing import Any
 
 from apps.server.sessions import DemoToolRegistry, SessionRunner
 
-from harness.model import ProviderConfig, ReverseProxy
-from harness.rate import RateWindow
+from orange.model import ProviderConfig, ReverseProxy
+from orange.rate import RateWindow
 
-_STATIC = Path(__file__).resolve().parents[1] / "src" / "harness" / "web"
+_STATIC = Path(__file__).resolve().parents[1] / "src" / "orange" / "web"
 
 Reply = tuple[str | None, list[dict[str, Any]]]
 
@@ -157,7 +157,7 @@ class TestToolTraceEvent:
     """工具调用的参数必须能被轨迹面板取到（对话区不再显示工具卡片）。"""
 
     def test_tool_event_carries_call_arguments(self, tmp_path: Path) -> None:
-        from harness.message import AssistantMsg, ToolCall, ToolMsg, UserMsg
+        from orange.message import AssistantMsg, ToolCall, ToolMsg, UserMsg
 
         runner = _runner(tmp_path, "trace")
         q = runner.subscribe()
@@ -178,7 +178,7 @@ class TestToolTraceEvent:
 
     def test_arguments_survive_far_back_assistant(self, tmp_path: Path) -> None:
         """产生调用的 AssistantMsg 远在窗口之外时，参数仍要能配对上。"""
-        from harness.message import AssistantMsg, ToolCall, ToolMsg, UserMsg
+        from orange.message import AssistantMsg, ToolCall, ToolMsg, UserMsg
 
         runner = _runner(tmp_path, "far")
         q = runner.subscribe()
@@ -196,7 +196,7 @@ class TestToolTraceEvent:
 
     def test_previous_groups_are_not_reannounced(self, tmp_path: Path) -> None:
         """回归：第二轮不得把第一轮的工具结果再发一遍（那会显示成空参数）。"""
-        from harness.message import AssistantMsg, ToolCall, ToolMsg, UserMsg
+        from orange.message import AssistantMsg, ToolCall, ToolMsg, UserMsg
 
         runner = _runner(tmp_path, "twice")
         q = runner.subscribe()
@@ -304,3 +304,11 @@ class TestFrontendContract:
         # the settings dialog must offer a retry rather than a dead end
         assert "重试" in self.js
         assert "loadSettings" in self.js
+
+    def test_brand_uses_the_logo_asset(self) -> None:
+        """顶栏图标必须是真实的 SVG 资源，而不是内联占位符。"""
+        root = _STATIC if _STATIC.is_dir() else _STATIC.parent
+        logo = root / "logo.svg"
+        assert logo.is_file(), "缺少 logo.svg，安装后图标会 404"
+        assert "/static/logo.svg" in self.html
+        assert 'type="image/svg+xml"' in self.html

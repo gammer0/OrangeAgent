@@ -1,6 +1,6 @@
-# Web 前端（FastAPI）
+﻿# Web 前端（FastAPI）
 
-> 服务层目录。核心编排包 `src/harness` **保持零 Web 框架**，此处只做包装。
+> 服务层目录。核心编排包 `src/orange` **保持零 Web 框架**，此处只做包装。
 > 该边界由 `scripts/check_constraints.py` 按目录强制执行。
 
 ---
@@ -22,7 +22,7 @@ uv run uvicorn apps.server.main:app --reload --port 8000
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│ HARNESS  ● 就绪 · N 会话            [模型 ▾]  [新建会话]     │
+│ ORANGE   ● 就绪 · N 会话            [模型 ▾]  [新建会话]     │
 ├──────────────┬────────────────────────────┬─────────────────┤
 │ 会话列表      │  对话流                    │ 轨迹 / 上下文 / 工具 │
 │              │                            │                 │
@@ -142,7 +142,7 @@ data: {"seq":12,"ts":1729000000.1,"kind":"assistant","payload":{...}}
 
 ## 5. 内置工具
 
-能力清单位于 `~/.OAgent/capabilities.json`（项目内 `.agent/capabilities.json` 优先），当前共 15 个工具 + skill + MCP：
+能力清单位于 `~/.orange/capabilities.json`（项目内 `.agent/capabilities.json` 优先），当前共 15 个工具 + skill + MCP：
 
 | 路径 | 说明 |
 |---|---|
@@ -166,7 +166,7 @@ flowchart LR
     API -->|"SSE"| UI
     API --> SM["SessionManager<br/>多会话"]
     SM --> SR["SessionRunner<br/>线程 + 事件队列"]
-    SR --> LOOP["AgentLoop<br/>src/harness"]
+    SR --> LOOP["AgentLoop<br/>src/orange"]
     LOOP --> PROXY["ReverseProxy"]
     PROXY --> LLM["模型供应商"]
     SR --> INBOX["Inbox<br/>安全点插话"]

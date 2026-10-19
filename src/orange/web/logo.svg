@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <!--
+    Orange mark — a mandarin mid-peel.
+
+    Designed for 16–24px first: at that size only silhouette and two colours
+    survive, so the shape is a bold circle, one high-contrast peel flap, and a
+    leaf. Segment lines are thick enough to read as texture, not noise.
+  -->
+  <defs>
+    <linearGradient id="flesh" x1="25%" y1="10%" x2="75%" y2="95%">
+      <stop offset="0%" stop-color="#ffbe5c"/>
+      <stop offset="60%" stop-color="#f68b1f"/>
+      <stop offset="100%" stop-color="#dd6b08"/>
+    </linearGradient>
+    <linearGradient id="peel" x1="0%" y1="100%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#ffe0a8"/>
+      <stop offset="100%" stop-color="#ffc266"/>
+    </linearGradient>
+  </defs>
+
+  <!-- fruit sphere -->
+  <circle cx="29" cy="37" r="22" fill="url(#flesh)"/>
+
+  <!-- three fat segment lines: readable when tiny -->
+  <g stroke="#c9600a" stroke-width="3" stroke-linecap="round" opacity="0.5">
+    <path d="M29 17v40"/>
+    <path d="M11 28.5c10 4 25 4 36 0"/>
+    <path d="M11 46c10-4 25-4 36 0"/>
+  </g>
+
+  <!-- highlight, keeps the sphere from reading flat -->
+  <ellipse cx="21" cy="28" rx="7" ry="5" fill="#ffd693" opacity="0.55"/>
+
+  <!-- peel flap: torn away to the upper right, showing the pale underside -->
+  <path d="M47 20c9 4 14 13 13 24-1 6-4 11-9 14 5-9 3-19-4-27-3-3.5-7-6-11-7.5z"
+        fill="url(#peel)"/>
+  <path d="M47 20c9 4 14 13 13 24" stroke="#e8a03a" stroke-width="2"
+        fill="none" stroke-linecap="round" opacity="0.7"/>
+
+  <!-- leaf -->
+  <path d="M30 16c-1.5-5-5-8.5-10-9.5 1 5 4.5 8.5 10 9.5z" fill="#4f8f3a"/>
+  <path d="M30 16c-4-4-7.5-6-10-6" stroke="#3d7230" stroke-width="1.6"
+        fill="none" stroke-linecap="round" opacity="0.8"/>
+</svg>

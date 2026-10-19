@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from harness.trace import TraceEvent, TraceLogger, trace_file_path
+from orange.trace import TraceEvent, TraceLogger, trace_file_path
 
 
 def _logger(tmp_path: Path, session_id: str = "s1", **kwargs: object) -> TraceLogger:

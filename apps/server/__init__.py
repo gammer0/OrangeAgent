@@ -1,7 +1,7 @@
-"""Harness web service layer (FastAPI).
+﻿"""Orange web service layer (FastAPI).
 
-Boundary with the core ``harness`` package:
+Boundary with the core ``orange`` package:
 
-* ``harness``: the orchestration kernel with zero web-framework dependencies;
+* ``orange``: the orchestration kernel with zero web-framework dependencies;
 * ``apps.server``: wraps the kernel as a REST + SSE service.
 """

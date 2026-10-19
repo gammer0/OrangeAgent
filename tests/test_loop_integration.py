@@ -4,11 +4,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from harness.context import ContextAssembler, SystemPromptParts
-from harness.inbox import Inbox
-from harness.jev import JevRouter
-from harness.loop import AgentLoop
-from harness.message import AssistantMsg, SystemMsg, ToolCall, validate_messages
+from orange.context import ContextAssembler, SystemPromptParts
+from orange.inbox import Inbox
+from orange.jev import JevRouter
+from orange.loop import AgentLoop
+from orange.message import AssistantMsg, SystemMsg, ToolCall, validate_messages
 
 BRANCHES = [f"/skill/b{i}" for i in range(1, 9)]
 
@@ -27,13 +27,13 @@ class ScriptedModel:
 
 class OkExecutor:
     def __call__(self, plan, resolver, on_group_done=None, *, max_workers=4) -> dict[str, Any]:
-        from harness.execution import ExecResult
+        from orange.execution import ExecResult
 
         results = {
             call.id: ExecResult(ok=True, content="ok", duration_ms=0) for call in plan.calls
         }
         if on_group_done is not None:
-            from harness.executor import GroupReport
+            from orange.executor import GroupReport
 
             for group in plan.groups:
                 on_group_done(

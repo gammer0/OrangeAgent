@@ -8,14 +8,14 @@ from __future__ import annotations
 
 import pytest
 
-from harness.message import (
+from orange.message import (
     AssistantMsg,
     SystemMsg,
     ToolCall,
     ToolMsg,
     UserMsg,
 )
-from harness.watermark import (
+from orange.watermark import (
     AUTO_1,
     AUTO_2,
     SESSION_END,

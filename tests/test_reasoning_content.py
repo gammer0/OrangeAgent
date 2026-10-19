@@ -7,8 +7,8 @@
 
 from __future__ import annotations
 
-from harness.message import AssistantMsg, UserMsg, to_provider
-from harness.model import OpenAIAdapter
+from orange.message import AssistantMsg, UserMsg, to_provider
+from orange.model import OpenAIAdapter
 
 
 def test_reasoning_content_preserved_in_request() -> None:

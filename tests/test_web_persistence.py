@@ -17,10 +17,10 @@ from typing import Any
 
 from apps.server.sessions import SessionManager
 
-from harness.message import AssistantMsg, ToolCall, ToolMsg, UserMsg
-from harness.model import ProviderConfig, ReverseProxy
-from harness.rate import RateWindow
-from harness.session_store import SessionStore
+from orange.message import AssistantMsg, ToolCall, ToolMsg, UserMsg
+from orange.model import ProviderConfig, ReverseProxy
+from orange.rate import RateWindow
+from orange.session_store import SessionStore
 
 Reply = tuple[str | None, list[dict[str, Any]]]
 

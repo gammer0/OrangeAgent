@@ -1,8 +1,8 @@
-"""Session runner: wraps AgentLoop into a run unit the web layer can subscribe to.
+﻿"""Session runner: wraps AgentLoop into a run unit the web layer can subscribe to.
 
 Design notes:
 
-* **Do not modify the core**: ``src/harness`` keeps zero web dependencies; this
+* **Do not modify the core**: ``src/orange`` keeps zero web dependencies; this
   module is adaptation only.
 * **Event stream, not polling**: each session owns an event queue that the web
   layer consumes over SSE.
@@ -40,22 +40,22 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from harness.capabilities import CapabilityError, CapabilityManifest, load_manifest
-from harness.context import ContextAssembler, SystemPromptParts
-from harness.discovery import DiscoveredTools, ToolDiscovery
-from harness.executor import execute_batch
-from harness.inbox import Inbox
-from harness.jev import JevRouter
-from harness.loop import AgentLoop, LoopHooks, StepController
-from harness.memory import ensure_working_memory
-from harness.message import AssistantMsg, Message, SystemMsg, ToolCall, ToolMsg, UserMsg
-from harness.model import ReverseProxy
-from harness.permission import AgentPermissions
-from harness.permission_store import WEB_AGENT, load_permissions
-from harness.session import Session, SessionRecord
-from harness.session_store import SessionStore
-from harness.settings import read_overrides
-from harness.tool_tree import EMPTY_SCHEMA, FlatStore, ToolDef, build_tree
+from orange.capabilities import CapabilityError, CapabilityManifest, load_manifest
+from orange.context import ContextAssembler, SystemPromptParts
+from orange.discovery import DiscoveredTools, ToolDiscovery
+from orange.executor import execute_batch
+from orange.inbox import Inbox
+from orange.jev import JevRouter
+from orange.loop import AgentLoop, LoopHooks, StepController
+from orange.memory import ensure_working_memory
+from orange.message import AssistantMsg, Message, SystemMsg, ToolCall, ToolMsg, UserMsg
+from orange.model import ReverseProxy
+from orange.permission import AgentPermissions
+from orange.permission_store import WEB_AGENT, load_permissions
+from orange.session import Session, SessionRecord
+from orange.session_store import SessionStore
+from orange.settings import read_overrides
+from orange.tool_tree import EMPTY_SCHEMA, FlatStore, ToolDef, build_tree
 
 __all__ = [
     "SessionEvent",
@@ -94,13 +94,13 @@ def effective_limits() -> dict[str, int]:
 
     Values are re-read for every turn rather than captured once at import, so a
     change made in the settings screen applies to the next message without a
-    restart. Bad values cannot escape :func:`harness.settings.read_overrides`,
+    restart. Bad values cannot escape :func:`orange.settings.read_overrides`,
     which drops unknown or malformed entries.
 
     Returns:
         ``max_steps`` / ``max_injects`` / ``max_workers`` as integers.
     """
-    from harness.defaults import DEFAULT_EXECUTION, DEFAULT_LOOP
+    from orange.defaults import DEFAULT_EXECUTION, DEFAULT_LOOP
 
     raw = read_overrides()
 
@@ -549,7 +549,7 @@ class SessionRunner:
         merge: bool = False,
     ) -> str:
         """Perform a single summarization call."""
-        from harness.message import SystemMsg, UserMsg
+        from orange.message import SystemMsg, UserMsg
 
         header = ""
         if total > 1 and not merge:
@@ -828,7 +828,7 @@ class SessionRunner:
 
     def cancel(self) -> None:
         """Request abort of this turn (takes effect at the next safe point)."""
-        from harness.inbox import InterruptRequest
+        from orange.inbox import InterruptRequest
 
         self._cancelled = True
         self.inbox.put_control(InterruptRequest(reason="user_abort", text=None))
@@ -1314,7 +1314,7 @@ class SessionManager:
         # A construction failure must not block service startup; degrade to relying
         # on max_sessions alone.
         try:
-            from harness.session import EvictionPolicy, SessionRegistry
+            from orange.session import EvictionPolicy, SessionRegistry
 
             self.registry: Any = SessionRegistry(EvictionPolicy())
             self.registry.start_sweeper()
@@ -1361,7 +1361,7 @@ class SessionManager:
                 except Exception:  # noqa: BLE001 - the watchdog must never die
                     continue
 
-        self._watchdog = threading.Thread(target=loop, daemon=True, name="harness-watchdog")
+        self._watchdog = threading.Thread(target=loop, daemon=True, name="orange-watchdog")
         self._watchdog.start()
 
     def stop_watchdog(self) -> None:
@@ -1479,7 +1479,7 @@ class SessionManager:
     def load_capabilities(self, workdir: str) -> None:
         """Override the tool tree from the capability manifest; keep demo tools on failure.
 
-        The manifest lives in the system data directory (``harness.paths``), with a
+        The manifest lives in the system data directory (``orange.paths``), with a
         project-local ``.agent/capabilities.json`` honoured when the repository
         commits one. It is an **operations surface**: a load failure must not
         prevent startup, so the error is only recorded in ``capability_error`` and

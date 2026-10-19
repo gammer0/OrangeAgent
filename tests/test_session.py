@@ -11,8 +11,8 @@ from pathlib import Path
 
 import pytest
 
-from harness.inbox import Inbox, InterruptRequest, UserInput
-from harness.session import (
+from orange.inbox import Inbox, InterruptRequest, UserInput
+from orange.session import (
     EvictionPolicy,
     Session,
     SessionRecord,
@@ -91,10 +91,10 @@ class TestWatermarkPlaceholder:
         assert Watermark.from_json(None) is None
 
     def test_does_not_import_context_layer(self) -> None:
-        import harness.session as session_module
+        import orange.session as session_module
 
         source = Path(session_module.__file__).read_text(encoding="utf-8")
-        assert "import harness.context" not in source
+        assert "import orange.context" not in source
 
 
 class TestResetHelpers:
@@ -238,7 +238,7 @@ class TestEviction:
         assert len(registry) == 2
 
     def test_eviction_keeps_database_records_H13(self, tmp_path) -> None:
-        from harness.session_store import SessionStore
+        from orange.session_store import SessionStore
 
         store = SessionStore(tmp_path)
         registry = SessionRegistry(policy=EvictionPolicy(max_resident=1))

@@ -7,7 +7,7 @@ import threading
 import pytest
 from pydantic import ValidationError
 
-from harness.rate import (
+from orange.rate import (
     ProviderHealth,
     RateEvent,
     RateWindow,

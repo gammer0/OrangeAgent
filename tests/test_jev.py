@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from harness.jev import (
+from orange.jev import (
     CONFIDENCE_THRESHOLD,
     JevRouter,
     build_route_prompt,
@@ -12,7 +12,7 @@ from harness.jev import (
     parse_route_reply,
     should_route,
 )
-from harness.message import AssistantMsg
+from orange.message import AssistantMsg
 
 BRANCHES = [f"/skill/mmd/branch{i}" for i in range(1, 9)]
 

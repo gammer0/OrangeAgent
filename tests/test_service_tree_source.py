@@ -1,17 +1,22 @@
 """工具树数据源回归测试。
 
-历史问题：``HarnessService._load_capability`` 写死 ``FlatStore()`` 空存储，
+历史问题：``OrangeService._load_capability`` 写死 ``FlatStore()`` 空存储，
 从不读 ``.agent/capabilities.json``。结果 CLI 看到空树，而 Web 服务按清单
 装载了实际工具——两边观测到的能力面完全不一致。
 """
 
 from __future__ import annotations
 
-import json
+from typing import Never
 
-from harness.capabilities import SkillDef, SourceSpec, save_manifest
-from harness.capabilities import CapabilityManifest, _build_external_tool
-from harness.service import build_service
+from orange.capabilities import (
+    CapabilityManifest,
+    SkillDef,
+    SourceSpec,
+    _build_external_tool,
+    save_manifest,
+)
+from orange.service import build_service
 
 _EXT_SOURCE = """\
 def read(path: str = ".") -> str:
@@ -106,7 +111,7 @@ def test_service_tree_matches_web_loader(tmp_path) -> None:
     from apps.server.sessions import SessionManager
 
     class _NullProxy:
-        def chat(self, *args, **kwargs):  # noqa: ANN002, ANN003
+        def chat(self, *args, **kwargs) -> Never:  # noqa: ANN002, ANN003
             raise AssertionError("proxy should not be used")
 
     manager = SessionManager(
