@@ -1,0 +1,149 @@
+# Orange
+
+一个可长期运行、工具能力可扩展的智能体平台。它在 ReAct 循环里调用工具并根据结果继续推理，工具数量增长到数百个时模型仍能找到正确的那个，换模型只改配置不改代码。
+
+```
+用户消息 → 上下文装配 → 模型推理 ⇄ 工具执行 → 轨迹落盘
+                ↑                        ↓
+           会话存储 ←─────────────── SSE 实时推送
+```
+
+## 为什么是 Orange
+
+大多数 agent 框架在工具数量增长后会失效：把所有工具的完整定义塞进提示词，几百个工具就撑爆上下文，模型也开始选错。Orange 的做法是把能力组织成一棵**可按需展开的树**——模型先看到一级目录，再用 `tree_query` 下钻到具体路径。前缀稳定，新增能力不会破坏已建立的上下文缓存。
+
+配套的几个设计取向：
+
+| 特性 | 实现方式 |
+|---|---|
+| **前缀稳定性优先** | `messages[0]` 逐字节不变；能力树展开走工具返回值，不重排版提示词 |
+| **失败即数据** | 工具异常不中断循环，降级为模型可观察的结果，由它决定重试或换路 |
+| **优化可回退** | 路由失效时无损退化为全量索引 |
+| **能力归属唯一** | 工具树路径即归属，一个能力只有一个可达路径 |
+| **可复原** | 每步下钻都有轨迹，落盘到 SQLite，崩溃后可定位 |
+
+## 安装
+
+需要 Python ≥ 3.12。
+
+```powershell
+uv tool install orange-0.1.0-py3-none-any.whl
+```
+
+装完后 `orange` 是一个独立命令，与项目目录无关：
+
+```powershell
+orange --help
+```
+
+从源码安装（开发用）：
+
+```powershell
+git clone <仓库地址> orange
+cd orange
+uv sync
+uv run orange --help
+```
+
+## 快速开始
+
+**1. 配置密钥**
+
+```powershell
+cd 你的工作目录
+orange config init          # 生成 .env
+```
+
+编辑 `.env`，填入至少这三项：
+
+```dotenv
+DEEPSEEK_API_KEY=sk-...
+DEEPSEEK_BASE_URL=https://api.deepseek.com
+DEEPSEEK_MODEL=deepseek-chat
+```
+
+**2. 自检**
+
+```powershell
+orange service doctor
+```
+
+逐项检查密钥、模型连通性、工具树、存储与上下文容量，不消耗额度。
+
+**3. 启动控制台**
+
+```powershell
+orange serve
+```
+
+打开 http://127.0.0.1:8012 ，在输入框发一条消息即可。界面包含会话列表、消息流（含流式输出）、下钻轨迹与设置面板。
+
+## 命令一览
+
+| 命令 | 用途 |
+|---|---|
+| `orange serve` | 启动 Web 控制台 |
+| `orange service` | 服务生命周期与状态（`doctor` / `status` / `sweep`） |
+| `orange config` | 超参数与配置（`show` / `get` / `check` / `env` / `init`） |
+| `orange tools` | 工具装载与查看 |
+| `orange skills` | skill 装载与查看 |
+| `orange groups` | 工具树分组管理 |
+| `orange mcp` | MCP 服务器管理（JSON-RPC over stdio） |
+| `orange perms` | 工具权限管理 |
+
+所有命令都接受 `--workdir` 指定工作目录、`--json` 输出机器可读结果。
+
+## 配置
+
+优先级：`~/.orange/settings.json` > 环境变量 / `.env` > 内置默认值。
+
+Web 界面里的设置面板只暴露常用项（如 `loop.max_steps`、`context.capacity`），完整参数用 CLI：
+
+```powershell
+orange config show                      # 全部默认值
+orange config get context.capacity      # 查单项
+orange config check                     # 校验合法性
+```
+
+数据目录默认 `~/.orange`，可用环境变量 `ORANGE_HOME` 覆盖。工作目录下的 `WORK.md` 是跨会话共享的工作记忆。
+
+## 项目结构
+
+```
+src/orange/          核心编排层（零 Web 框架依赖）
+  loop.py            ReAct 循环
+  context.py         上下文装配与压缩
+  tool_tree.py       能力树与下钻
+  executor.py        工具执行
+  session_store.py   SQLite 持久化
+  web/               前端静态资源
+apps/server/         FastAPI + SSE 服务层
+docs/                设计文档
+tests/               测试
+```
+
+核心层禁止导入任何 Web 框架或编排框架，这条约束由 `scripts/check_constraints.py` 强制执行。
+
+## 开发
+
+```powershell
+uv sync
+uv run pytest -q                          # 794 项测试
+uv run ruff check src/orange apps/server tests
+uv run python scripts/check_constraints.py
+uv build --wheel
+```
+
+## 文档
+
+| 文档 | 内容 |
+|---|---|
+| `docs/01-系统架构设计.md` | 产品定位、设计原则、总体架构、关键机制 |
+| `docs/02-数据结构设计/` | 逐模块数据结构定义 |
+| `docs/10-CLI使用手册.md` | 命令行完整参考 |
+| `docs/11-前端使用手册.md` | 控制台界面说明 |
+| `docs/12-安装与使用指南.md` | 安装与故障排查 |
+
+## 许可
+
+未声明。

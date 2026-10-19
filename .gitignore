@@ -38,22 +38,27 @@ coverage.xml
 .DS_Store
 
 # Agent customization (local-only: skills, agents, prompts)
-.github/*
+.github
 
 # Runtime output
 output/
+WORK.md
+
+# Build artifacts (distribute via Release, not the repo)
+*.whl
+*.tar.gz
 
 # Session database (recreated on start; never commit conversation data)
-.agent/harness.db
-.agent/harness.db-shm
-.agent/harness.db-wal
+.agent/orange.db
+.agent/orange.db-shm
+.agent/orange.db-wal
 outputs/
 logs/
 *.log
 tmp/
 temp/
 
-# Harness runtime data
+# Orange runtime data
 checkpoints/
 sessions/
 runs/
