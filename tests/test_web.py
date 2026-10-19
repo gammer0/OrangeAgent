@@ -127,8 +127,12 @@ class TestModelsAndTools:
     def test_tools_listed(self, client: TestClient) -> None:
         payload = client.get("/api/tools").json()
         paths = {t["path"] for t in payload["tools"]}
-        assert "/tool/os/file/read" in paths
-        assert "/tool/os/echo" in paths
+        assert paths == {
+            "/tool/os/file/read",
+            "/tool/os/file/list",
+            "/tool/os/file/write",
+            "/tool/os/file/append",
+        }
 
 
 class TestSessionLifecycle:

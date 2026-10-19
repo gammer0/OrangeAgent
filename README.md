@@ -22,6 +22,21 @@
 | **能力归属唯一** | 工具树路径即归属，一个能力只有一个可达路径 |
 | **可复原** | 每步下钻都有轨迹，落盘到 SQLite，崩溃后可定位 |
 
+## 内置能力
+
+本发布版**只提供工作区文件访问**，不含命令执行、Python 运行、网络请求与 MCP 工具——这些能力会扩大攻击面，需要的话请自行通过 `orange tools add-ext` 挂载。
+
+| 工具 | 说明 |
+|---|---|
+| `/tool/os/file/read` | 按行读取工作目录内的文本文件 |
+| `/tool/os/file/list` | 列出目录条目（文件/目录 + 大小） |
+| `/tool/os/file/write` | 整体写入文件（覆盖），自动建目录 |
+| `/tool/os/file/append` | 追加写入文件 |
+
+另有**树查询**能力：每个中间路径（如 `/tool`、`/tool/os`）本身就是可调用节点，调用即返回下一层子节点。这是系统机制，不是普通工具，因此不占工具槽位。
+
+首次启动会自动写入 `capabilities.json` 并挂载上述 4 个工具，无需手工配置。
+
 ## 安装
 
 需要 Python ≥ 3.12。
@@ -85,7 +100,7 @@ orange serve
 | `orange serve` | 启动 Web 控制台 |
 | `orange service` | 服务生命周期与状态（`doctor` / `status` / `sweep`） |
 | `orange config` | 超参数与配置（`show` / `get` / `check` / `env` / `init`） |
-| `orange tools` | 工具装载与查看 |
+| `orange tools` | 工具装载与查看（`list` / `add` / `remove` / `add-ext`） |
 | `orange skills` | skill 装载与查看 |
 | `orange groups` | 工具树分组管理 |
 | `orange mcp` | MCP 服务器管理（JSON-RPC over stdio） |

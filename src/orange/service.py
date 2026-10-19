@@ -34,6 +34,7 @@ from orange.capabilities import (
     CapabilityError,
     CapabilityManifest,
     load_manifest,
+    seed_manifest,
 )
 from orange.config import ConfigError, LLMConfig, build_proxy, load_llm_config
 from orange.context import ContextAssembler
@@ -51,6 +52,7 @@ from orange.permission_store import LOCAL_AGENT, load_permissions
 from orange.session import EvictionPolicy, SessionRegistry
 from orange.session_store import SessionStore
 from orange.tool_tree import FlatStore, ToolTree, build_tree
+from orange.tools_builtin import DEFAULT_PATHS
 from orange.trace import TraceLogger
 
 __all__ = [
@@ -225,8 +227,11 @@ class OrangeService:
         Note: the capability manifest must be read here, otherwise the CLI
         sees an empty tree while the web service loads the real tools from the
         manifest -- the two sides would observe different capability surfaces.
-        A missing or invalid manifest falls back to an empty tree (conservative
-        degradation, consistent with I4).
+
+        A missing manifest is **seeded** with the shipped default tools rather
+        than degrading to an empty tree: a freshly installed copy has no
+        manifest file, and an empty tree would leave the model with nothing to
+        call. Any other failure still degrades to an empty tree (I4).
 
         Permissions are read for agent_id=``local`` so the CLI and the runtime see
         the same blocking results; a missing file yields an empty table
@@ -238,8 +243,16 @@ class OrangeService:
             try:
                 manifest = load_manifest(self.workdir, problems=manifest_problems)
             except CapabilityError as exc:
-                self.problems.append(f"capability: {exc}")
-                manifest = None
+                if "does not exist" in str(exc):
+                    try:
+                        seed_manifest(self.workdir, paths_to_mount=DEFAULT_PATHS)
+                        manifest = load_manifest(self.workdir, problems=manifest_problems)
+                    except Exception as seed_exc:  # noqa: BLE001 - degrade, never crash
+                        self.problems.append(f"capability: {seed_exc}")
+                        manifest = None
+                else:
+                    self.problems.append(f"capability: {exc}")
+                    manifest = None
             self.problems.extend(manifest_problems)
             if manifest is not None:
                 for entry in manifest.to_tooldefs(str(self.workdir)):

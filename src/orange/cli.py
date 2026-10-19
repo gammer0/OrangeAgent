@@ -29,7 +29,6 @@ from typing import Any
 
 from orange.capabilities import (
     BUILTIN_SKILLS,
-    BUILTIN_TOOL_PATHS,
     CapabilityError,
     CapabilityManifest,
     GroupDef,
@@ -39,14 +38,16 @@ from orange.capabilities import (
     build_builtin_tool,
     group_of,
     load_manifest,
+    manifest_path,
     save_manifest,
+    seed_manifest,
     skills_dir,
     write_skill_files,
 )
 from orange.config import ConfigError, load_llm_config
 from orange.defaults import as_dict as defaults_as_dict
 from orange.service import ServiceStatus, build_service
-from orange.tools_builtin import TOOL_SPECS
+from orange.tools_builtin import DEFAULT_PATHS, TOOL_SPECS
 
 __all__ = ["main", "build_parser"]
 
@@ -472,45 +473,46 @@ def _cmd_config_init(args: argparse.Namespace) -> int:
 
 
 #: Preset groups: ``orange tools add --preset <name>``.
+#:
+#: This release ships only workspace file access; execution, network and MCP
+#: tools are not built into the wheel, so the presets that referenced them are
+#: gone rather than left dangling.
 TOOL_PRESETS: dict[str, tuple[str, ...]] = {
-    "core": ("/tool/os/file/read", "/tool/os/file/list", "/tool/os/file/write", "/tool/os/echo"),
-    "coding": (
+    "core": (
         "/tool/os/file/read",
         "/tool/os/file/list",
         "/tool/os/file/write",
         "/tool/os/file/append",
-        "/tool/code/py/check",
-        "/tool/code/py/run_brief",
-        "/tool/os/shell/run",
     ),
-    "game": (
-        "/tool/game/snake/check",
-        "/tool/game/snake/demo",
-        "/tool/code/py/check",
-        "/tool/code/py/run_brief",
+    "all": (
+        "/tool/os/file/read",
+        "/tool/os/file/list",
+        "/tool/os/file/write",
+        "/tool/os/file/append",
     ),
-    "mcp-filesystem": ("/mcp/fs/list", "/mcp/fs/read", "/mcp/fs/write"),
-    "all": tuple(BUILTIN_TOOL_PATHS),
 }
 
 #: Preset name -> description (kept in sync with ``TOOL_PRESETS``).
 PRESET_HINTS: dict[str, str] = {
-    "core": "最小文件读写（4 个）",
-    "coding": "编码闭环：读写 + 语法检查 + 短运行 + shell",
-    "game": "游戏验收：结构检查 + 无头自推演（依赖 coding 的 py 工具）",
-    "mcp-filesystem": "MCP filesystem 命名空间（3 个）",
-    "all": "全部内置工具",
+    "core": "工作区文件读写（4 个）",
+    "all": "全部内置工具（同 core）",
 }
 
 
 def _load_or_empty(workdir: str) -> CapabilityManifest:
-    """Read the manifest; returns an empty manifest when absent (for the first ``add``)."""
-    try:
-        return load_manifest(workdir)
-    except CapabilityError as exc:
-        if "不存在" in str(exc):
-            return CapabilityManifest()
-        raise
+    """Read the manifest, seeding the shipped defaults when it is absent.
+
+    The absence check is by file, not by parsing the exception message: the
+    message is English, so matching on a translated substring silently made
+    the very first ``tools add`` fail on a fresh install.
+
+    Seeding here too keeps the CLI and the runtime on the same capability
+    surface -- otherwise ``tools list`` would report an empty manifest while
+    ``orange serve`` was already using the default tools.
+    """
+    if not manifest_path(workdir).is_file():
+        seed_manifest(workdir, paths_to_mount=DEFAULT_PATHS)
+    return load_manifest(workdir)
 
 
 def _save_and_report(manifest: CapabilityManifest, workdir: str, *, as_json: bool) -> None:

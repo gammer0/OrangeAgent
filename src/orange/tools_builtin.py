@@ -20,16 +20,13 @@ arbitrary code.
 
 from __future__ import annotations
 
-import ast
 import inspect
 import os
 import subprocess
-import sys
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from orange.paths import WORK_MEMORY_FILENAME
 from orange.permission import CapName, Permission
 from orange.tool_tree import ToolDef
 
@@ -145,222 +142,6 @@ def file_append(workdir: str, path: str, content: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Working memory (dedicated read/write; no arbitrary paths)
-# ---------------------------------------------------------------------------
-
-#: Working-memory relative path. Lives directly in the working directory
-#: (C4); imported from ``paths`` so the three call sites cannot drift apart.
-_WORK_MEMORY_REL = WORK_MEMORY_FILENAME
-
-
-def _work_memory_file(workdir: str) -> Path:
-    """Return the absolute path of the working-memory file (fixed; never model-supplied)."""
-    return _resolve(workdir, _WORK_MEMORY_REL)
-
-
-def memory_work_read(workdir: str, offset: int = 0, limit: int = 400) -> str:
-    """Read working memory. The path is fixed, so the model cannot target another file."""
-    target = _work_memory_file(workdir)
-    if not target.is_file():
-        return f"（工作记忆尚不存在：{_WORK_MEMORY_REL}）"
-    return file_read(workdir, _WORK_MEMORY_REL, offset=offset, limit=limit)
-
-
-def memory_work_append(workdir: str, content: str) -> str:
-    """Append a block to working memory.
-
-    Append rather than overwrite: working memory is shared across sessions, so
-    overwriting would erase what another session wrote.
-    """
-    if not content.strip():
-        raise ValueError("content must not be empty")
-    target = _work_memory_file(workdir)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    suffix = "" if content.endswith("\n") else "\n"
-    with target.open("a", encoding="utf-8", newline="\n") as handle:
-        handle.write(content + suffix)
-    return f"已追加 {len(content)} 字符到 {_WORK_MEMORY_REL}（累计 {target.stat().st_size} 字节）"
-
-
-def memory_work_replace(workdir: str, content: str) -> str:
-    """Rewrite working memory entirely (for consolidation).
-
-    Differs from ``file_write``: the path is fixed to working memory and cannot
-    write anywhere else.
-    """
-    target = _work_memory_file(workdir)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    text = content if content.endswith("\n") else content + "\n"
-    target.write_text(text, encoding="utf-8", newline="\n")
-    return f"已重写 {_WORK_MEMORY_REL}：{len(text)} 字符"
-
-
-def os_echo(text: str) -> str:
-    """Return the text unchanged."""
-    return text
-
-
-# ---------------------------------------------------------------------------
-# Network tools
-# ---------------------------------------------------------------------------
-
-#: Default timeout for network tools (seconds). Shorter than execution tools:
-#: HTTP hanging is more common than a command hanging.
-HTTP_TIMEOUT_S = 15
-
-#: Allowed URL schemes. Only http/https, ruling out accidental protocols like file://.
-_ALLOWED_SCHEMES = ("http://", "https://")
-
-
-def _check_url(url: str) -> str:
-    """Validate the URL scheme; raises ``ValueError`` when it is not allowed."""
-    text = (url or "").strip()
-    if not text:
-        raise ValueError("URL must not be empty")
-    if not text.lower().startswith(_ALLOWED_SCHEMES):
-        raise ValueError(f"only http/https is supported: {url}")
-    return text
-
-
-def net_get(url: str, timeout: int = HTTP_TIMEOUT_S) -> str:
-    """GET a URL; returns status code, content type and body (clipped)."""
-    import httpx
-
-    target = _check_url(url)
-    limit = max(1, min(int(timeout), 60))
-    try:
-        response = httpx.get(target, timeout=limit, follow_redirects=True)
-    except httpx.TimeoutException as exc:
-        raise TimeoutError(f"request timed out ({limit}s): {target}") from exc
-    except httpx.HTTPError as exc:
-        raise ConnectionError(f"request failed: {type(exc).__name__}: {exc}") from exc
-
-    body = response.text
-    head = (
-        f"状态 {response.status_code} {response.reason_phrase}\n"
-        f"类型 {response.headers.get('content-type', '未知')}\n"
-        f"长度 {len(body)} 字符\n"
-        f"---\n"
-    )
-    return _clip(head + body)
-
-
-def net_post(
-    url: str,
-    body: str = "",
-    content_type: str = "application/json",
-    timeout: int = HTTP_TIMEOUT_S,
-) -> str:
-    """POST to a URL sending ``body`` as-is; returns status code and body (clipped)."""
-    import httpx
-
-    target = _check_url(url)
-    limit = max(1, min(int(timeout), 60))
-    headers = {"Content-Type": content_type or "application/json"}
-    try:
-        response = httpx.post(
-            target, content=body.encode("utf-8"), headers=headers, timeout=limit,
-            follow_redirects=True,
-        )
-    except httpx.TimeoutException as exc:
-        raise TimeoutError(f"request timed out ({limit}s): {target}") from exc
-    except httpx.HTTPError as exc:
-        raise ConnectionError(f"request failed: {type(exc).__name__}: {exc}") from exc
-
-    text = response.text
-    head = (
-        f"状态 {response.status_code} {response.reason_phrase}\n"
-        f"类型 {response.headers.get('content-type', '未知')}\n"
-        f"长度 {len(text)} 字符\n"
-        f"---\n"
-    )
-    return _clip(head + text)
-
-
-def net_head(url: str, timeout: int = HTTP_TIMEOUT_S) -> str:
-    """HEAD a URL; returns status and headers only (probes availability without downloading)."""
-    import httpx
-
-    target = _check_url(url)
-    limit = max(1, min(int(timeout), 60))
-    try:
-        response = httpx.head(target, timeout=limit, follow_redirects=True)
-    except httpx.TimeoutException as exc:
-        raise TimeoutError(f"request timed out ({limit}s): {target}") from exc
-    except httpx.HTTPError as exc:
-        raise ConnectionError(f"request failed: {type(exc).__name__}: {exc}") from exc
-
-    lines = [
-        f"状态 {response.status_code} {response.reason_phrase}",
-        *[f"{key}: {value}" for key, value in sorted(response.headers.items())],
-    ]
-    return _clip("\n".join(lines))
-
-
-# ---------------------------------------------------------------------------
-# Execution tools
-# ---------------------------------------------------------------------------
-
-
-def shell_run(workdir: str, command: str, timeout: int = DEFAULT_TIMEOUT_S) -> str:
-    """Run one command inside ``workdir`` (no shell-interpreter string splicing)."""
-    if timeout > 120:
-        timeout = 120
-    code, output = _run(
-        ["powershell", "-NoProfile", "-NonInteractive", "-Command", command],
-        workdir,
-        timeout,
-    )
-    return f"退出码 {code}\n{output}"
-
-
-def py_check(workdir: str, path: str) -> str:
-    """Syntax check: compile a single .py file and report whether it passes."""
-    target = _resolve(workdir, path)
-    if not target.is_file():
-        raise FileNotFoundError(f"文件不存在: {path}")
-    source = target.read_text(encoding="utf-8", errors="replace")
-    try:
-        ast.parse(source, filename=str(target))
-    except SyntaxError as exc:
-        return f"语法错误 {path}:{exc.lineno}:{exc.offset} — {exc.msg}"
-    return f"语法 OK：{path}（{len(source.splitlines())} 行）"
-
-
-def py_run_brief(workdir: str, path: str, timeout: int = DEFAULT_TIMEOUT_S) -> str:
-    """Run a script briefly and collect its output (for non-interactive self-check scripts)."""
-    target = _resolve(workdir, path)
-    if not target.is_file():
-        raise FileNotFoundError(f"文件不存在: {path}")
-    code, output = _run(
-        [sys.executable, "-B", str(target)],
-        str(target.parent),
-        timeout,
-    )
-    return f"退出码 {code}\n{output}"
-
-
-# ---------------------------------------------------------------------------
-# MCP (filesystem semantics) namespace
-# ---------------------------------------------------------------------------
-
-
-def mcp_fs_read(workdir: str, path: str) -> str:
-    """Equivalent of MCP filesystem read_text_file."""
-    return file_read(workdir, path, limit=2_000)
-
-
-def mcp_fs_write(workdir: str, path: str, content: str) -> str:
-    """Equivalent of MCP filesystem write_file."""
-    return file_write(workdir, path, content)
-
-
-def mcp_fs_list(workdir: str, path: str = ".") -> str:
-    """Equivalent of MCP filesystem list_directory."""
-    return file_list(workdir, path)
-
-
-# ---------------------------------------------------------------------------
 # Specification table
 # ---------------------------------------------------------------------------
 
@@ -400,6 +181,12 @@ def _spec(
 
 _STR = {"type": "string"}
 #: Specification table: path -> definition. Order is the CLI display order.
+#:
+#: **Release profile**: this distribution ships only workspace file access.
+#: Execution (shell / Python), network and MCP tools are deliberately absent --
+#: a published agent that can run arbitrary commands on the user's machine is
+#: not something we want to hand out. Tree query is not listed here: every
+#: ``abstract`` node gets one implicitly (see ``orange.tool_tree``).
 TOOL_SPECS: dict[str, dict[str, Any]] = {
     s["path"]: s
     for s in [
@@ -416,43 +203,6 @@ TOOL_SPECS: dict[str, dict[str, Any]] = {
               {"path": _STR, "content": _STR}, ["path", "content"], ["write"]),
         _spec("/tool/os/file/append", file_append, "追加写入文件",
               {"path": _STR, "content": _STR}, ["path", "content"], ["write"]),
-        _spec("/tool/os/echo", os_echo, "原样回显文本，用于连通性测试",
-              {"text": _STR}, ["text"], ["read"], True, "session"),
-        _spec("/tool/os/shell/run", shell_run, "在子进程中执行一条命令（带超时）",
-              {"command": _STR, "timeout": {"type": "integer", "default": DEFAULT_TIMEOUT_S}},
-              ["command"], ["exec"]),
-        _spec("/tool/code/py/check", py_check, "Python 语法检查，返回错误行号",
-              {"path": _STR}, ["path"], ["read"], True),
-        _spec("/tool/code/py/run_brief", py_run_brief, "短时运行脚本并返回输出（带超时）",
-              {"path": _STR, "timeout": {"type": "integer", "default": DEFAULT_TIMEOUT_S}},
-              ["path"], ["exec"]),
-        _spec("/mcp/fs/list", mcp_fs_list, "MCP filesystem：列出目录（URI 语义）",
-              {"path": {"type": "string", "default": "."}}, [], ["read"], True),
-        _spec("/mcp/fs/read", mcp_fs_read, "MCP filesystem：读取文本文件",
-              {"path": _STR}, ["path"], ["read"], True),
-        _spec("/mcp/fs/write", mcp_fs_write, "MCP filesystem：写入文本文件",
-              {"path": _STR, "content": _STR}, ["path", "content"], ["write"]),
-        # ---- network access (caps=net; disjoint from file/exec capabilities) ----
-        _spec("/tool/net/http/get", net_get, "HTTP GET，返回状态/类型/正文（截断）",
-              {"url": _STR, "timeout": {"type": "integer", "default": HTTP_TIMEOUT_S}},
-              ["url"], ["net"], True, "global"),
-        _spec("/tool/net/http/post", net_post, "HTTP POST，原样发送 body",
-              {"url": _STR, "body": {"type": "string", "default": ""},
-               "content_type": {"type": "string", "default": "application/json"},
-               "timeout": {"type": "integer", "default": HTTP_TIMEOUT_S}},
-              ["url"], ["net"], False, "global"),
-        _spec("/tool/net/http/head", net_head, "HTTP HEAD，只取状态与响应头",
-              {"url": _STR, "timeout": {"type": "integer", "default": HTTP_TIMEOUT_S}},
-              ["url"], ["net"], True, "global"),
-        # ---- working memory (fixed path; no arbitrary writes) ----
-        _spec("/tool/memory/work/read", memory_work_read, "读取工作记忆 WORK.md",
-              {"offset": {"type": "integer", "default": 0},
-               "limit": {"type": "integer", "default": 400}},
-              [], ["read"], True),
-        _spec("/tool/memory/work/append", memory_work_append, "追加一段到工作记忆（不覆盖）",
-              {"content": _STR}, ["content"], ["write"]),
-        _spec("/tool/memory/work/replace", memory_work_replace, "整体重写工作记忆（整理用）",
-              {"content": _STR}, ["content"], ["write"]),
     ]
 }
 
@@ -460,6 +210,19 @@ TOOL_SPECS: dict[str, dict[str, Any]] = {
 def known_paths() -> list[str]:
     """All builtin paths in the specification table (sorted)."""
     return sorted(TOOL_SPECS)
+
+
+#: Tools a fresh install mounts automatically on first start.
+#:
+#: This is the whole shipped capability surface: read, list, write, append
+#: inside the working directory. Tree query needs no entry -- every abstract
+#: node gets one from ``orange.tool_tree``.
+DEFAULT_PATHS: tuple[str, ...] = (
+    "/tool/os/file/read",
+    "/tool/os/file/list",
+    "/tool/os/file/write",
+    "/tool/os/file/append",
+)
 
 
 def build_tool(path: str, workdir: str) -> ToolDef:

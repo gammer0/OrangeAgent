@@ -40,7 +40,7 @@ import importlib.util
 import inspect
 import json
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -524,6 +524,23 @@ def save_manifest(manifest: CapabilityManifest, workdir: str | Path) -> Path:
     )
     tmp.replace(target)
     return target
+
+
+def seed_manifest(workdir: str | Path, *, paths_to_mount: Iterable[str]) -> Path:
+    """Create a manifest on first run so a fresh install is usable.
+
+    Without this a just-installed copy has no manifest, therefore an empty
+    tree, therefore no tools at all -- the model would have nothing to call.
+    Only writes when absent; an existing manifest is never touched.
+    """
+    from orange.tools_builtin import TOOL_SPECS
+
+    manifest = CapabilityManifest()
+    for path in paths_to_mount:
+        if path not in TOOL_SPECS:
+            raise CapabilityError(f"unknown builtin tool: {path!r}")
+        manifest.add_tool(build_builtin_tool(path, str(workdir)))
+    return save_manifest(manifest, workdir)
 
 
 def load_manifest(

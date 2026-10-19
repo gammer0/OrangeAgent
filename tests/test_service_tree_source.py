@@ -17,6 +17,7 @@ from orange.capabilities import (
     save_manifest,
 )
 from orange.service import build_service
+from orange.tools_builtin import DEFAULT_PATHS
 
 _EXT_SOURCE = """\
 def read(path: str = ".") -> str:
@@ -85,15 +86,33 @@ def test_service_tree_has_expected_leaf_count(tmp_path) -> None:
         service.close()
 
 
-def test_service_degrades_to_empty_tree_without_manifest(tmp_path) -> None:
-    """无清单时退回空树，而不是崩溃（保守降级）。"""
+def test_service_seeds_default_tools_without_manifest(tmp_path) -> None:
+    """无清单时自动播种默认工具，而不是给一个空树。
+
+    全新安装没有 capabilities.json。若退回空树，模型将无任何工具可调，
+    产品开箱即不可用——所以这里必须播种。
+    """
     service = build_service(tmp_path, load_model=False)
     try:
         assert service.tree is not None
         assert service.flat_store is not None
-        assert len(service.flat_store.active_paths()) == 0
-        # 记录原因，便于运维发现
-        assert any("capability" in item for item in service.problems)
+        active = service.flat_store.active_paths()
+        assert set(active) == set(DEFAULT_PATHS)
+        assert len(active) == 4
+        # 播种成功后不应再有 capability 问题
+        assert not any("capability" in item for item in service.problems)
+    finally:
+        service.close()
+
+
+def test_seeding_does_not_overwrite_existing_manifest(tmp_path) -> None:
+    """已有清单时不得被默认工具覆盖。"""
+    _write_manifest(tmp_path)
+    service = build_service(tmp_path, load_model=False)
+    try:
+        assert service.flat_store is not None
+        # 仍是手写清单的 3 个条目，没有掺入默认 4 个
+        assert len(service.flat_store.active_paths()) == 3
     finally:
         service.close()
 

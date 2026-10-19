@@ -218,16 +218,19 @@ class DemoToolRegistry:
                 description="写入文件（覆盖）",
             ),
             ToolDef(
-                tool_id="t_echo",
-                path="/tool/os/echo",
-                fn=self._echo,
+                tool_id="t_append_file",
+                path="/tool/os/file/append",
+                fn=self._append_file,
                 schema={
                     "type": "object",
-                    "properties": {"text": {"type": "string"}},
-                    "required": ["text"],
+                    "properties": {
+                        "path": {"type": "string"},
+                        "content": {"type": "string"},
+                    },
+                    "required": ["path", "content"],
                 },
-                caps=["read"],
-                description="原样回显文本，用于连通性测试",
+                caps=["write"],
+                description="追加写入文件",
             ),
         ]
 
@@ -268,8 +271,14 @@ class DemoToolRegistry:
         target.write_text(content, encoding="utf-8")
         return f"已写入 {len(content)} 字符到 {path}"
 
-    def _echo(self, text: str) -> str:
-        return text
+    def _append_file(self, path: str, content: str) -> str:
+        from pathlib import Path
+
+        target = Path(self._resolve(path))
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with target.open("a", encoding="utf-8") as handle:
+            handle.write(content)
+        return f"已追加 {len(content)} 字符到 {path}"
 
     # ---- resolver used by AgentLoop ----
 
