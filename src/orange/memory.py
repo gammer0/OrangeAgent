@@ -5,11 +5,14 @@ See docs/02-data-structures/05-memory.md.
 Design notes:
 
 * Memory is stored as **files**, not in-memory objects.
-* Both files live in the system data directory (``orange.paths``), never in
-  the user's project: writing ``.agent/WORK.md`` into the edited repository
-  pollutes it with files the user never asked for.
-* Working memory ``<home>/WORK.md`` is free text; the system never parses its
-  structure (C1).
+* Working memory lives directly in the user's working directory as
+  ``<workdir>/WORK.md`` (C4): it is project-scoped and shared by every
+  session opened on that directory. Nothing is written into a nested
+  ``.agent/`` subdirectory.
+* Long-term memory ``<home>/MEMORY.md`` lives in the system data directory,
+  so it is shared across all projects on this machine.
+* Working memory ``<workdir>/WORK.md`` is free text; the system never parses
+  its structure (C1).
 * Long-term memory ``<home>/MEMORY.md`` is system-wide unique and
   append-merge only (C7).
 * Every write goes through "temp file + ``os.replace``" for atomicity (C4).

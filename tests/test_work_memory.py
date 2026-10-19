@@ -153,3 +153,27 @@ class TestServiceIntegration:
             assert service.tree is not None
         finally:
             service.close()
+
+
+class TestWorkMemoryPathConsistency:
+    """工具层与记忆层必须指向同一文件。
+
+    这两处曾有分歧：``memory.py`` 用 ``<workdir>/WORK.md``，而
+    ``tools_builtin.py`` 硬编码 ``.agent/WORK.md``。后果是模型通过
+    ``/tool/memory/work/*`` 读写的文件与系统自动创建的不是同一个，
+    工作记忆静默分裂成两份。
+    """
+
+    def test_tool_layer_matches_memory_layer(self, tmp_path: Path) -> None:
+        from orange.tools_builtin import _work_memory_file
+
+        assert _work_memory_file(str(tmp_path)) == work_memory_path(tmp_path)
+
+    def test_tool_layer_writes_where_ensure_creates(self, tmp_path: Path) -> None:
+        """工具写下的内容，``ensure_working_memory`` 认得是同一个文件。"""
+        from orange.tools_builtin import memory_work_append
+
+        path, _ = ensure_working_memory(tmp_path)
+        memory_work_append(str(tmp_path), "工具写入的一行")
+
+        assert path.read_text(encoding="utf-8").endswith("工具写入的一行\n")

@@ -140,7 +140,7 @@ class OrangeService:
 
     Attributes:
         workdir: Working directory the tools are confined to (``.env`` and
-            ``.agent/WORK.md`` live there); other Orange data lives in
+            ``<workdir>/WORK.md`` live there); other Orange data lives in
             ``~/.OAgent``.
         config: LLM configuration; ``None`` when loading failed.
         flat_store / tree: Tool capability layer.
@@ -161,7 +161,7 @@ class OrangeService:
         """Assemble the service.
 
         Args:
-            workdir: Working directory. ``.env`` and ``.agent/WORK.md`` are
+            workdir: Working directory. ``.env`` and ``<workdir>/WORK.md`` are
                 resolved relative to it; global data goes to ``~/.OAgent``.
             capacity: Context capacity (tokens).
             load_model: Whether to load the model channel. When ``False`` only
@@ -203,7 +203,7 @@ class OrangeService:
     # --------------------------------------------------------- assembly
 
     def _ensure_work_memory(self) -> None:
-        """Ensure ``<workdir>/.agent/WORK.md`` exists (created from the template if missing).
+        """Ensure ``<workdir>/WORK.md`` exists (created from the template if missing).
 
         Working memory is project-scoped, so it is created inside the working
         directory; global data stays in ``~/.OAgent``. The system prompt tells the

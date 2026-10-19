@@ -29,6 +29,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from orange.paths import WORK_MEMORY_FILENAME
 from orange.permission import CapName, Permission
 from orange.tool_tree import ToolDef
 
@@ -147,8 +148,9 @@ def file_append(workdir: str, path: str, content: str) -> str:
 # Working memory (dedicated read/write; no arbitrary paths)
 # ---------------------------------------------------------------------------
 
-#: Working-memory relative path (kept in sync with ``memory.py`` to avoid drift).
-_WORK_MEMORY_REL = ".agent/WORK.md"
+#: Working-memory relative path. Lives directly in the working directory
+#: (C4); imported from ``paths`` so the three call sites cannot drift apart.
+_WORK_MEMORY_REL = WORK_MEMORY_FILENAME
 
 
 def _work_memory_file(workdir: str) -> Path:
@@ -443,7 +445,7 @@ TOOL_SPECS: dict[str, dict[str, Any]] = {
               {"url": _STR, "timeout": {"type": "integer", "default": HTTP_TIMEOUT_S}},
               ["url"], ["net"], True, "global"),
         # ---- working memory (fixed path; no arbitrary writes) ----
-        _spec("/tool/memory/work/read", memory_work_read, "读取工作记忆 .agent/WORK.md",
+        _spec("/tool/memory/work/read", memory_work_read, "读取工作记忆 WORK.md",
               {"offset": {"type": "integer", "default": 0},
                "limit": {"type": "integer", "default": 400}},
               [], ["read"], True),
