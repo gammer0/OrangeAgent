@@ -23,7 +23,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import shutil
 import sys
 from pathlib import Path
 from typing import Any
@@ -130,24 +129,28 @@ def _resolve_key(key: str, flat: dict[str, Any]) -> tuple[str, Any]:
 
 
 def _env_template(dest: Path) -> None:
-    """Generate ``.env.example``.
+    """Write the configuration template to ``dest``.
 
-    Copies the repo template when present, otherwise writes the builtin one.
+    Always uses the builtin string rather than copying a file from the project
+    root: an installed package has no source tree, so a path-based lookup would
+    silently fall back and (worse) ship a *different* template to pip users than
+    to developers. One constant is the single source of truth.
     """
-    bundled = Path(__file__).resolve().parents[2] / ENV_TEMPLATE_NAME
-    if bundled.is_file() and bundled.resolve() != dest.resolve():
-        shutil.copyfile(bundled, dest)
-        return
     dest.write_text(_BUILTIN_ENV_TEMPLATE, encoding="utf-8")
 
 
 _BUILTIN_ENV_TEMPLATE = """\
-# Harness configuration template -- copy to .env and fill in real values
+# Harness 配置
+# 必填：从 https://platform.deepseek.com/api_keys 获取密钥后替换下面一行
 DEEPSEEK_API_KEY=sk-your-key-here
+
+# 模型端点（一般无需修改）
 DEEPSEEK_BASE_URL=https://api.deepseek.com
 DEEPSEEK_MODEL=deepseek-chat
+
+# 生成参数
 LLM_TEMPERATURE=0.7
-LLM_MAX_TOKENS=4096
+LLM_MAX_TOKENS=8192
 LLM_TIMEOUT=60
 LLM_MAX_RETRIES=2
 """
@@ -462,7 +465,7 @@ def _cmd_config_env(args: argparse.Namespace) -> int:
 
 
 def _cmd_config_init(args: argparse.Namespace) -> int:
-    """``harness config init``: generate an ``.env`` template."""
+    """``harness config init``: write a ready-to-edit ``.env``."""
     target = Path(args.workdir).resolve() / args.output
     if target.exists() and not args.force:
         print(f"目标已存在: {target}（使用 --force 覆盖）", file=sys.stderr)
@@ -470,7 +473,8 @@ def _cmd_config_init(args: argparse.Namespace) -> int:
 
     _env_template(target)
     print(f"已生成: {target}")
-    print("下一步：填入真实 DEEPSEEK_API_KEY，然后运行 `harness config check`")
+    print("请编辑该文件，把 DEEPSEEK_API_KEY 换成真实密钥，然后运行：")
+    print("  harness config check")
     return 0
 
 
@@ -1283,7 +1287,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     init = config_sub.add_parser("init", help="生成 .env 模板")
     _add_common_options(init)
-    init.add_argument("--output", default=".env.example", help="输出文件名")
+    init.add_argument("--output", default=".env", help="输出文件名，默认 .env")
     init.add_argument("--force", action="store_true", help="覆盖已存在文件")
     init.set_defaults(func=_cmd_config_init)
 
