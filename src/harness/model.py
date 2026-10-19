@@ -22,8 +22,9 @@ is the Anthropic style, which takes about a hundred lines.
 from __future__ import annotations
 
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field
+from json import loads as _json_loads
 from typing import Any, Protocol
 
 from harness.message import AssistantMsg, Message, SystemMsg, ToolCall, to_provider
@@ -138,6 +139,16 @@ class Transport(Protocol):
         """Send a POST and return the JSON response body."""
         ...
 
+    def stream_post(
+        self, url: str, *, headers: dict[str, str], json: dict[str, Any]
+    ) -> Iterator[dict[str, Any]]:
+        """Send a POST and yield each server-sent event payload as it arrives.
+
+        Only the streaming path needs this; transports that cannot stream may
+        omit it, in which case the proxy falls back to a single ``post``.
+        """
+        ...
+
 
 class Adapter(Protocol):
     """Vendor adapter protocol."""
@@ -242,6 +253,105 @@ class OpenAIAdapter:
             tokens_in=int(usage.get("prompt_tokens", 0) or 0),
             tokens_out=int(usage.get("completion_tokens", 0) or 0),
             model=str(payload.get("model", "")),
+        )
+
+
+class StreamAccumulator:
+    """Rebuild a complete reply from OpenAI streaming deltas.
+
+    Streaming sends *fragments*: ``content`` arrives in pieces, and tool calls
+    are spread across frames -- the first frame carries ``index``/``id``/``name``
+    and later frames append ``arguments`` keyed by that index. This class
+    reassembles them so the rest of the system can keep working with a single
+    :class:`AssistantMsg`, while :meth:`feed` also reports newly arrived text so
+    the UI can render it immediately.
+
+    Attributes:
+        reasoner: Whether ``reasoning_content`` is recorded (the caller decides
+            this per provider so a non-reasoning model costs nothing).
+    """
+
+    def __init__(self, *, reasoner: bool = False) -> None:
+        self._content: list[str] = []
+        self._reasoning: list[str] = []
+        self._calls: dict[int, dict[str, str]] = {}
+        self._model = ""
+        self.tokens_in = 0
+        self.tokens_out = 0
+        self.reasoner = reasoner
+
+    def feed(self, event: dict[str, Any]) -> str:
+        """Consume one stream frame and return the text delta it carried.
+
+        Args:
+            event: One parsed SSE payload from the provider.
+
+        Returns:
+            The newly arrived ``content`` fragment (``""`` when the frame carries
+            only tool-call metadata, reasoning, or usage).
+        """
+        if not self._model:
+            self._model = str(event.get("model") or "")
+
+        usage = event.get("usage") or {}
+        if usage:
+            self.tokens_in = int(usage.get("prompt_tokens", 0) or 0) or self.tokens_in
+            self.tokens_out = int(usage.get("completion_tokens", 0) or 0) or self.tokens_out
+
+        choices = event.get("choices") or []
+        if not choices:
+            return ""
+        delta = choices[0].get("delta") or {}
+
+        reasoning = delta.get("reasoning_content")
+        if reasoning and self.reasoner:
+            self._reasoning.append(str(reasoning))
+
+        for item in delta.get("tool_calls") or []:
+            index = int(item.get("index", 0) or 0)
+            slot = self._calls.setdefault(
+                index, {"id": "", "name": "", "arguments": ""}
+            )
+            if item.get("id"):
+                slot["id"] = str(item["id"])
+            function = item.get("function") or {}
+            if function.get("name"):
+                # Some providers resend the full name instead of a fragment.
+                slot["name"] = (
+                    str(function["name"])
+                    if not slot["name"]
+                    else slot["name"] + str(function["name"])
+                )
+            if function.get("arguments"):
+                slot["arguments"] += str(function["arguments"])
+
+        content = delta.get("content")
+        if content:
+            self._content.append(str(content))
+            return str(content)
+        return ""
+
+    def build(self) -> LLMResponse:
+        """Materialise the accumulated fragments into a normal response."""
+        tool_calls = [
+            ToolCall(
+                id=slot["id"],
+                name=decode_tool_name(slot["name"]),
+                arguments=slot["arguments"] or "{}",
+            )
+            for _, slot in sorted(self._calls.items())
+        ]
+        text = "".join(self._content)
+        message = AssistantMsg(
+            content=text if text or not tool_calls else None,
+            tool_calls=tool_calls,
+            reasoning_content="".join(self._reasoning) or None,
+        )
+        return LLMResponse(
+            message=message,
+            tokens_in=self.tokens_in,
+            tokens_out=self.tokens_out,
+            model=self._model,
         )
 
 
@@ -481,6 +591,57 @@ class OpenAITransport:
         payload: dict[str, Any] = response.json()
         return payload
 
+    def stream_post(
+        self, url: str, *, headers: dict[str, str], json: dict[str, Any]
+    ) -> Iterator[dict[str, Any]]:
+        """Stream a chat completion, yielding one parsed event dict per SSE frame.
+
+        The request body must already say ``stream: true``. Frames are parsed
+        line by line so the caller can render tokens as they arrive instead of
+        waiting for the whole answer -- without this, a long reply appears all at
+        once and the UI looks frozen.
+
+        Note:
+            ``json`` here is the *request body*, which shadows the module. Frames
+            are therefore decoded through :mod:`json`'s function aliased below,
+            not through the parameter.
+
+        Raises:
+            ModelError: On a non-2xx status, mirroring :meth:`post`.
+        """
+        import httpx
+
+        decode = _json_loads
+        with httpx.stream(
+            "POST", url, headers=headers, json=json, timeout=self.timeout
+        ) as response:
+            if response.status_code >= 500 or response.status_code == 429:
+                response.read()
+                raise ModelError(
+                    f"HTTP {response.status_code}: {response.text[:200]}",
+                    provider="http",
+                    retryable=True,
+                )
+            if response.status_code >= 400:
+                response.read()
+                raise ModelError(
+                    f"HTTP {response.status_code}: {response.text[:200]}",
+                    provider="http",
+                    retryable=False,
+                )
+            for line in response.iter_lines():
+                if not line or not line.startswith("data:"):
+                    continue
+                data = line[5:].strip()
+                if not data:
+                    continue
+                if data == "[DONE]":
+                    break
+                try:
+                    yield decode(data)
+                except ValueError:
+                    continue
+
 
 # ---------------------------------------------------------------------------
 # Reverse proxy
@@ -611,6 +772,114 @@ class ReverseProxy:
             self.providers,
             key=lambda p: 0 if self.health[p.name].state == "healthy" else 1,
         )
+
+    def chat_stream(
+        self,
+        messages: Sequence[Message],
+        *,
+        session_id: str,
+        on_delta: Callable[[str], None] | None = None,
+        discovered: list[dict[str, Any]] | None = None,
+        model: str | None = None,
+        tools: Sequence[ToolSpec] | None = None,
+    ) -> LLMResponse:
+        """Perform one model call, reporting text fragments as they arrive.
+
+        The message is *not* assembled incrementally here: a turn may end in tool
+        calls rather than text, and callers need one complete message either way.
+        ``on_delta`` is therefore purely a preview channel for the UI -- the
+        authoritative reply is still the returned :class:`LLMResponse`, which the
+        loop appends to history exactly once.
+
+        Streaming falls back to a plain :meth:`chat` when the transport cannot
+        stream, so a fake transport in tests keeps working unchanged.
+
+        Args:
+            messages: Session messages.
+            session_id: For usage accounting and rate limiting.
+            on_delta: Called with each newly arrived text fragment.
+            discovered: Discovered-tools inventory.
+            model: Model override.
+
+        Returns:
+            The fully assembled response.
+        """
+        provider = self._candidates()[0]
+        health = self.health[provider.name]
+        decision = health.can_send(self._clock())
+        if decision != "allow":
+            # Do not attempt a stream against an unhealthy provider: the caller
+            # gets the same failover behaviour it has today.
+            return self.chat(
+                messages,
+                session_id=session_id,
+                discovered=discovered,
+                model=model,
+                tools=tools,
+            )
+
+        body = provider.adapter.build_request(
+            messages,
+            model=model or provider.model,
+            temperature=self.temperature,
+            max_tokens=self.max_tokens,
+            discovered=discovered,
+            tools=tools,
+        )
+        estimated = _estimate_request_tokens(body)
+        if not self.rate_window.try_acquire(session_id, estimated, self._clock()):
+            raise RateLimitError(
+                f"global rate window rejected the request (session={session_id})"
+            )
+
+        headers = {"Content-Type": "application/json", **provider.headers}
+        if provider.api_key:
+            headers.setdefault("Authorization", f"Bearer {provider.api_key}")
+        url = provider.base_url.rstrip("/") + provider.endpoint
+
+        transport = self.transport or OpenAITransport(provider.base_url, provider.api_key)
+        stream_post = getattr(transport, "stream_post", None)
+        if stream_post is None:
+            return self._call_with_retry(
+                provider,
+                messages,
+                session_id=session_id,
+                discovered=discovered,
+                model=model or provider.model,
+                tools=tools,
+            )
+
+        accumulator = StreamAccumulator(
+            reasoner="reasoning" in provider.model.lower()
+        )
+        started = False
+        try:
+            for event in stream_post(url, headers=headers, json={**body, "stream": True}):
+                started = True
+                fragment = accumulator.feed(event)
+                if fragment and on_delta is not None:
+                    on_delta(fragment)
+        except ModelError:
+            if not started:
+                # Nothing was emitted yet, so retrying on another provider cannot
+                # produce duplicate text.
+                health.on_failure(self._clock())
+                return self._call_with_retry(
+                    provider,
+                    messages,
+                    session_id=session_id,
+                    discovered=discovered,
+                    model=model or provider.model,
+                    tools=tools,
+                )
+            raise
+
+        response = accumulator.build()
+        self.rate_window.record_actual(
+            session_id, response.tokens_in + response.tokens_out, self._clock()
+        )
+        health.on_success()
+        return response
 
     def _call_with_retry(
         self,

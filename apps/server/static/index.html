@@ -665,6 +665,35 @@ function appendAssistant(text, final, ts) {
   scrollBottom();
 }
 
+/** Append streamed text to the in-progress bubble, creating it on the first fragment. */
+function appendDelta(text) {
+  if (!text) return;
+  let node = $("delta-text");
+  if (!node) {
+    const wrap = el("div", "msg assistant");
+    wrap.id = "delta-msg";
+    const avatar = el("div", "avatar", "agent");
+    const body = el("div", "body");
+    node = el("div", "text");
+    node.id = "delta-text";
+    body.append(node, el("div", "meta", "streaming"));
+    wrap.append(avatar, body);
+    $("stream").appendChild(wrap);
+  }
+  node.textContent += text;
+  scrollBottom();
+}
+
+/** Discard the preview bubble once the authoritative reply is available. */
+function finishDelta(finalText) {
+  const node = $("delta-msg");
+  if (!node) return;
+  // Always drop the preview: the authoritative reply either replaces it (text
+  // case) or the turn was tool-calls-only, where a leftover bubble would sit in
+  // the conversation forever as a duplicate of an earlier answer.
+  node.remove();
+}
+
 function showThinking() {
   if ($("thinking")) return;
   const box = el("div", "msg assistant");
@@ -723,11 +752,24 @@ function handleEvent(ev) {
   pushTrace(kind, payload, ts, seq);
 
   switch (kind) {
+    case "delta":
+      // Live preview: append the fragment to a bubble that is still being
+      // written. The finished reply always arrives afterwards as "assistant",
+      // which replaces this bubble -- so a dropped delta can never corrupt the
+      // final text.
+      hideThinking();
+      appendDelta(payload.text || "");
+      break;
+
     case "assistant":
       hideThinking();
       // Tool calls are intentionally not rendered in the conversation: the
       // dialogue shows only what the assistant says to the user. The trace
       // panel is the single surface for tool activity.
+      // Retire the preview unconditionally: a tool-call-only turn sends an
+      // assistant event with no content, and the preview would otherwise stay
+      // behind as a duplicate bubble.
+      finishDelta(payload.content || "");
       if (payload.content) appendAssistant(payload.content, payload.final, ts);
       break;
 
@@ -755,7 +797,10 @@ function handleEvent(ev) {
       updateSendState(payload.state);
       loadSessions().catch(() => {});
       if (payload.state === "running") showThinking();
-      if (["done", "aborted", "error"].includes(payload.state)) hideThinking();
+      if (["done", "aborted", "error"].includes(payload.state)) {
+        hideThinking();
+        finishDelta("");
+      }
       break;
 
     case "error":
@@ -774,6 +819,10 @@ function updateSendState(stateName) {
 /* ---------------- 轨迹 ---------------- */
 
 function pushTrace(kind, payload, ts, seq) {
+  // Streaming fragments are a rendering detail, not an audit event: they would
+  // flood the panel (hundreds per reply) and bury the tool activity this panel
+  // exists to show. The finished text is recorded as the assistant message.
+  if (kind === "delta") return;
   // Two sources feed this list: the persisted trace loaded on select, and the
   // live SSE stream. After a select the stream replays whatever the server still
   // retains, which overlaps the stored backlog -- so an event that arrives twice

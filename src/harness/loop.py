@@ -220,6 +220,9 @@ class LoopHooks:
         on_descent: Called with a descent's raw output when its turn is dropped
             from history, so the caller can move the children into the
             discovered-tools inventory.
+        on_delta: Called with each text fragment as the model produces it, so a
+            UI can render the answer while it is still being generated. This is a
+            preview only -- the complete reply arrives as one ``AssistantMsg``.
     """
 
     on_assistant: Callable[[AssistantMsg], None] | None = None
@@ -229,6 +232,7 @@ class LoopHooks:
     on_abort: Callable[[str], None] | None = None
     on_summary: Callable[[str], None] | None = None
     on_descent: Callable[[str], None] | None = None
+    on_delta: Callable[[str], None] | None = None
 
 
 @dataclass
@@ -355,7 +359,7 @@ class AgentLoop:
             # discovered-tools inventory. The current turn's descents stay, since
             # the model needs those children to pick its next call.
             outgoing = self.visible_history(outgoing)
-            assistant = self.model.chat(outgoing)
+            assistant = self._call_model(outgoing)
             messages.append(assistant)
             if self.hooks.on_assistant is not None:
                 self.hooks.on_assistant(assistant)
@@ -519,6 +523,40 @@ class AgentLoop:
                     and message.tool_call_id in self.descent_call_ids
                 ):
                     self.hooks.on_descent(message.content)
+
+    def _call_model(self, outgoing: Sequence[Message]) -> AssistantMsg:
+        """Call the model, forwarding text fragments to the UI when supported.
+
+        Streaming is optional by design: the orchestration layer talks to a
+        ``chat(messages)`` callable, and only the web runner's client exposes a
+        ``chat_stream`` variant. When it is absent (CLI, tests) the plain call is
+        used, so behaviour there is unchanged.
+
+        The streaming callback is a *preview* channel only -- the assistant message
+        appended to history is always the single complete reply, never the
+        fragments.
+        """
+        chat_stream = getattr(self.model, "chat_stream", None)
+        if chat_stream is None:
+            return self.model.chat(outgoing)
+
+        emitted = [False]
+
+        def on_delta(text: str) -> None:
+            if not text:
+                return
+            emitted[0] = True
+            if self.hooks.on_delta is not None:
+                self.hooks.on_delta(text)
+
+        try:
+            return chat_stream(outgoing, on_delta=on_delta)
+        except TypeError:
+            # A model object that defines ``chat_stream`` with a different
+            # signature must not break the turn; fall back to the plain call.
+            if emitted[0]:
+                raise
+            return self.model.chat(outgoing)
 
     def _is_descent(self, path: str) -> bool:
         """Whether ``path`` names an abstract node rather than a real tool.

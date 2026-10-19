@@ -526,10 +526,14 @@ class SessionRunner:
                 del self._recent[: len(self._recent) - EVENT_REPLAY_MAX]
             subscribers = list(self._subscribers)
         # Durable audit trail: flushed to its own table at the next safe point.
-        with self._trace_lock:
-            self._trace_pending.append((kind, payload, event.ts))
-            if len(self._trace_pending) > EVENT_REPLAY_MAX:
-                del self._trace_pending[: len(self._trace_pending) - EVENT_REPLAY_MAX]
+        # High-frequency preview events are excluded -- a single reply produces
+        # hundreds of deltas, which would bloat the table without adding any
+        # audit value (the finished text is stored as the assistant message).
+        if kind != "delta":
+            with self._trace_lock:
+                self._trace_pending.append((kind, payload, event.ts))
+                if len(self._trace_pending) > EVENT_REPLAY_MAX:
+                    del self._trace_pending[: len(self._trace_pending) - EVENT_REPLAY_MAX]
         for sub in subscribers:
             try:
                 sub.put_nowait(event)
@@ -729,6 +733,7 @@ class SessionRunner:
             on_abort=self._on_abort,
             on_summary=self._on_summary,
             on_descent=self._on_descent,
+            on_delta=self._on_delta,
         )
 
         controller = StepController(max_steps=20)
@@ -799,6 +804,30 @@ class SessionRunner:
                     session_id=session_id,
                     # Declare the roots plus everything discovered so far, so a
                     # node the model just learned about is actually callable.
+                    tools=self.owner.tools.tool_specs(
+                        (self.owner._expanded_paths, self.owner.discovered)
+                    ),
+                    model=self.owner.model,
+                    discovered=self.owner.discovered_rows(),
+                )
+                return response.message
+
+            def chat_stream(
+                self,
+                messages: list[Message],
+                *,
+                on_delta: Any = None,
+            ) -> AssistantMsg:
+                """Stream one reply, forwarding text fragments for live rendering.
+
+                Without this the console only ever showed a finished answer: the
+                whole reply arrived at once and the UI looked frozen for however
+                long the model took.
+                """
+                response = self.owner.proxy.chat_stream(
+                    messages,
+                    session_id=session_id,
+                    on_delta=on_delta,
                     tools=self.owner.tools.tool_specs(
                         (self.owner._expanded_paths, self.owner.discovered)
                     ),
@@ -1016,9 +1045,18 @@ class SessionRunner:
         self.persist_pending()
         self.persist_trace()
 
+    def _on_delta(self, text: str) -> None:
+        """Forward one text fragment of the reply currently being generated.
+
+        The fragment is **not** buffered for persistence: the finished reply is
+        appended to history and flushed once, so storing deltas would duplicate
+        the answer in the message table and in the trace. This event exists only
+        so the browser can render the text as it arrives.
+        """
+        self.emit("delta", {"text": text})
+
     def _on_inject(self, message: UserMsg, channel: str) -> None:
         self.emit("inject", {"channel": channel, "text": message.content})
-
     def _on_abort(self, reason: str) -> None:
         self.emit("state", {"state": "aborted", "detail": reason})
 
