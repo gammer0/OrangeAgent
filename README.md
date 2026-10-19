@@ -24,7 +24,7 @@
 
 ## 内置能力
 
-本发布版**只提供工作区文件访问**，不含命令执行、Python 运行、网络请求与 MCP 工具——这些能力会扩大攻击面，需要的话请自行通过 `orange tools add-ext` 挂载。
+本发布版**内置**的只有工作区文件访问，不含命令执行、Python 运行与网络请求——这些能力会扩大攻击面。需要时可通过外置工具或 MCP 服务器自行挂载，见[加载外置工具](#加载外置工具)。
 
 | 工具 | 说明 |
 |---|---|
@@ -36,6 +36,121 @@
 另有**树查询**能力：每个中间路径（如 `/tool`、`/tool/os`）本身就是可调用节点，调用即返回下一层子节点。这是系统机制，不是普通工具，因此不占工具槽位。
 
 首次启动会自动写入 `capabilities.json` 并挂载上述 4 个工具，无需手工配置。
+
+## 加载外置工具
+
+除内置工具外，还可以挂载两类外来能力：**Python 函数**（进程内调用）与 **MCP 服务器**（JSON-RPC over stdio）。
+
+### 一、Python 外置工具
+
+#### 1. 准备一个 Python 文件
+
+文件里需要一个函数，默认名字是 `run`：
+
+```python
+# ./ext/sort_numbers.py
+def run(numbers: list[int]) -> str:
+    return str(sorted(numbers))
+```
+
+约定：
+
+- **参数以关键字传入**（内部执行 `fn(**kwargs)`），返回值会被转成字符串交给模型。
+- 若签名里声明了 `workdir`，运行时会把当前工作目录注入进去，模型看不到这个参数：
+
+  ```python
+  def run(path: str, workdir: str) -> str:
+      return f"{workdir}/{path}"
+  ```
+
+- `--target` 支持两种形式：
+
+  | 形式 | 示例 | 解析方式 |
+  |---|---|---|
+  | 脚本路径 | `./ext/sort_numbers.py` | 相对 `--workdir` 解析 |
+  | 模块名 | `mypkg.tools.hello` | 从 `sys.path` 导入 |
+
+#### 2. 准备参数 schema（强烈建议）
+
+不给 schema 时工具会得到一个空参数表，模型不知道传什么，等于不可用。
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "numbers": {
+      "type": "array",
+      "items": { "type": "integer" },
+      "description": "待排序的整数列表"
+    }
+  },
+  "required": ["numbers"]
+}
+```
+
+#### 3. 装载
+
+```powershell
+orange tools add-ext /tool/demo/sort `
+  --target ./ext/sort_numbers.py `
+  --description "排序整数列表" `
+  --caps read `
+  --schema ./ext/schema.json `
+  --workdir .
+```
+
+| 参数 | 必填 | 说明 |
+|---|---|---|
+| `path`（位置参数） | 是 | 工具树路径，如 `/tool/demo/sort`；分组从路径推导 |
+| `--target` | 是 | 脚本路径或模块名 |
+| `--callable` | 否 | 函数名，默认 `run` |
+| `--description` | 否 | 单行描述。模型靠它选择工具，建议必填 |
+| `--caps` | 否 | 能力位，可重复，默认 `exec`；常用 `read` / `write` / `net` |
+| `--schema` | 否 | 参数 schema 的 JSON 文件 |
+| `--idempotent` | 否 | 标记为幂等 |
+| `--group` | 否 | 省略时从 `path` 推导 |
+
+装载后清单写入工作目录的 `capabilities.json`（无本地清单时写 `~/.orange/capabilities.json`）。
+
+> **装载时即校验**：`add-ext` 会立刻导入模块并查找函数，文件不存在或找不到函数会当场报错，而不是等模型调用时才崩。
+>
+> **没有沙箱**：外置工具与主进程同权限运行，安全性取决于你对代码来源的信任。
+
+### 二、MCP 服务器
+
+```powershell
+orange mcp add fs --command npx --arg=-y --arg "@modelcontextprotocol/server-filesystem" --arg ./ws
+```
+
+| 参数 | 说明 |
+|---|---|
+| `name`（位置参数） | 服务器名，同时作为 `/mcp/<name>` 分组名 |
+| `--command` | 可执行文件，如 `npx`、`uvx`、`python` |
+| `--arg` | 命令参数，可重复。**以 `--` 开头的值须写成 `--arg=--root`**，否则 argparse 会把它当成新选项 |
+| `--env` | 环境变量 `K=V`，可重复 |
+| `--args-file` | 从文件读取参数，每行一个；参数很多时比反复写 `--arg` 清晰 |
+
+`mcp add` 会立即拉起服务器、握手并拉取工具清单，逐个挂到 `/mcp/<name>/` 下。上面这条命令实测输出：
+
+```
+已添加 MCP 服务器: fs
+  发现 14 个工具，已装载 14 个到 /mcp/fs/
+```
+
+管理命令：
+
+```powershell
+orange mcp list     # 列出已声明的服务器与工具
+orange mcp remove fs
+```
+
+### 三、查看装载结果
+
+```powershell
+orange tools list              # 已装载的全部工具
+orange tools list --available  # 内置可用工具与预设
+orange tools remove <path>     # 摘除某个工具
+```
 
 ## 安装
 
