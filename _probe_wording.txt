@@ -1,3 +1,0 @@
-V1 原始措辞: {'/tool/os/file/write': 4, '/tool/memory/work/read, /mcp/workspace/list_dir': 2}
-V2 动作优先: {'/mcp/workspace/write_file': 3, '/tool/os/file/write': 3}
-V3 明确工具: {'/tool/os/file/write': 6}

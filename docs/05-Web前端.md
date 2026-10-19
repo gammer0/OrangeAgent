@@ -1,4 +1,4 @@
-﻿# Web 前端（FastAPI）
+# Web 前端（FastAPI）
 
 > 服务层目录。核心编排包 `src/orange` **保持零 Web 框架**，此处只做包装。
 > 该边界由 `scripts/check_constraints.py` 按目录强制执行。

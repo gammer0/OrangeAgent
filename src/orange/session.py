@@ -1,4 +1,4 @@
-﻿"""Session layer (group H).
+"""Session layer (group H).
 
 See docs/02-data-structures/02-session-layer.md.
 

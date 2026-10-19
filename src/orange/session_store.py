@@ -1,4 +1,4 @@
-﻿"""Session-layer SQLite persistence (H6-H9, H13, H14).
+"""Session-layer SQLite persistence (H6-H9, H13, H14).
 
 See docs/02-data-structures/02-session-layer.md §2.3.
 

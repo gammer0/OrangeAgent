@@ -1,4 +1,4 @@
-﻿"""User-editable runtime settings (written from the settings UI or CLI).
+"""User-editable runtime settings (written from the settings UI or CLI).
 
 Why a separate layer: :mod:`orange.defaults` holds the *shipped* defaults and is
 frozen on purpose -- tests assert docs and code agree on it. A settings screen

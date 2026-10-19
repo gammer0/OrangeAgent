@@ -1,4 +1,4 @@
-﻿"""Permission persistence: store ``AgentPermissions.grants`` in ``permissions.json``.
+"""Permission persistence: store ``AgentPermissions.grants`` in ``permissions.json``.
 
 Data lives in the system data directory (``orange.paths``); a project-local
 ``.agent/permissions.json`` is still read when present.

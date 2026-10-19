@@ -61,3 +61,8 @@ runs/
 # pytest temp
 .pytest-tmp/
 .pytest_tmp/
+
+# Scratch files (debug probes, ad-hoc screenshots)
+.tmp_*
+_*.json
+_*.txt

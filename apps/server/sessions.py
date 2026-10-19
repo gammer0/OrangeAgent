@@ -1,4 +1,4 @@
-﻿"""Session runner: wraps AgentLoop into a run unit the web layer can subscribe to.
+"""Session runner: wraps AgentLoop into a run unit the web layer can subscribe to.
 
 Design notes:
 

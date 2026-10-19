@@ -1,4 +1,4 @@
-﻿# Orange CLI 使用手册
+# Orange CLI 使用手册
 
 > 面向日常使用。命令都在项目根目录执行，前缀 `uv run python -m orange.cli`。
 > 装好之后可以直接用短命令 `orange`（见 [§9 安装](#9-安装为命令行工具)）。

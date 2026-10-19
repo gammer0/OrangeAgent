@@ -1,4 +1,4 @@
-﻿"""Capability manifest: tool and skill definitions, mount state and disk persistence.
+"""Capability manifest: tool and skill definitions, mount state and disk persistence.
 
 This is the configuration surface of ADT-4/ADT-5.
 

@@ -264,48 +264,27 @@ def _cmd_serve(args: argparse.Namespace) -> int:
     """``orange serve``: run the web console.
 
     Exists so an installed copy needs no knowledge of ASGI entry points or
-    uvicorn flags -- ``orange serve`` is the whole command. Errors are reported
-    as a sentence rather than a traceback, because the common failure (wrong
-    working directory, missing key) is a user mistake, not a bug.
+    uvicorn flags -- ``orange serve`` is the whole command.
+
+    真正的启动逻辑在 ``apps/server/launch.py``：核心层禁止导入 Web 框架
+    （由 ``scripts/check_constraints.py`` 强制），所以这里只做转发。
     """
     try:
-        import uvicorn
-    except ImportError:  # pragma: no cover - declared dependency
-        print("缺少 uvicorn，请重新安装：uv tool install . --force", file=sys.stderr)
+        from apps.server.launch import serve
+    except ImportError:
+        print(
+            "缺少 Web 服务层（apps/）。请重新安装：uv tool install . --force",
+            file=sys.stderr,
+        )
         return 1
 
-    workdir = Path(args.workdir).resolve()
-    # ``create_app`` reads the working directory to locate ``.env`` and the tool
-    # root, so the process must actually be there -- passing the path alone is
-    # not enough.
-    os.chdir(workdir)
-
-    if not args.json:
-        print(f"Orange 控制台：http://{args.host}:{args.port}")
-        print(f"工作目录：{workdir}")
-        print("按 Ctrl+C 停止\n")
-
-    try:
-        uvicorn.run(
-            "apps.server.main:app",
-            host=args.host,
-            port=args.port,
-            reload=bool(args.reload),
-            log_level="info",
-        )
-    except KeyboardInterrupt:  # pragma: no cover - interactive
-        print("\n已停止")
-    except OSError as exc:
-        # Binding a busy port is the most common startup failure. A raw
-        # traceback hides the one thing the user needs to know: switch ports.
-        if getattr(exc, "errno", None) in {48, 98, 10048} or "10048" in str(exc):
-            print(
-                f"端口 {args.port} 已被占用。换一个端口：orange serve --port {args.port + 1}",
-                file=sys.stderr,
-            )
-            return 1
-        raise
-    return 0
+    return serve(
+        workdir=args.workdir,
+        host=args.host,
+        port=args.port,
+        reload=bool(args.reload),
+        quiet=bool(args.json),
+    )
 
 
 def _cmd_service_sweep(args: argparse.Namespace) -> int:
@@ -453,7 +432,6 @@ def _cmd_config_env(args: argparse.Namespace) -> int:
         ("LLM_TIMEOUT", "HTTP 超时（秒）"),
         ("LLM_MAX_RETRIES", "重试次数"),
     ]
-    import os
 
     payload = []
     for name, desc in rows:

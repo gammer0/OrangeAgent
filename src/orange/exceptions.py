@@ -1,4 +1,4 @@
-﻿"""Unified exception definitions.
+"""Unified exception definitions.
 
 This module defines exception types only; it contains no handling logic
 (see docs/01-architecture.md §4.9 for handling).

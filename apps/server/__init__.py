@@ -1,4 +1,4 @@
-﻿"""Orange web service layer (FastAPI).
+"""Orange web service layer (FastAPI).
 
 Boundary with the core ``orange`` package:
 

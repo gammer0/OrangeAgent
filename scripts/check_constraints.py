@@ -3,7 +3,7 @@
 三件事：
 
 1. 依赖白名单：``pyproject.toml`` 只允许设计文档约定的包。
-2. 导入边界：``src/harness`` 不得导入 ``tests``，不得使用框架类库。
+2. 导入边界：``src/orange`` 不得导入 ``tests``，不得使用框架类库。
 3. 约束覆盖：设计文档中的约束编号必须在源码或测试中出现。
 
 用法::
@@ -33,7 +33,7 @@ ALLOWED_DEPENDENCIES = {
     "pydantic",
     "python-dotenv",
     "rich",
-    # Web 服务层（仅 apps/ 使用，核心 src/harness 仍禁止导入）
+    # Web 服务层（仅 apps/ 使用，核心 src/orange 仍禁止导入）
     "fastapi",
     "uvicorn",
 }
@@ -95,7 +95,7 @@ def _scan_imports(file: Path) -> set[str]:
 def check_import_boundaries() -> list[str]:
     """校验导入边界（按目录区分白名单）。
 
-    * ``src/harness``：核心层，``BANNED_MODULES`` 全部禁止，且不得导入 ``tests``。
+    * ``src/orange``：核心层，``BANNED_MODULES`` 全部禁止，且不得导入 ``tests``。
     * ``apps/``：服务层，允许 FastAPI/Starlette/Uvicorn，其余编排框架仍禁止，
       且不得直接导入 ``tests``。
 

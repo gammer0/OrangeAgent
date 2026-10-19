@@ -1,4 +1,4 @@
-﻿"""FastAPI service layer: REST + SSE, exposing multi-session, model selection and
+"""FastAPI service layer: REST + SSE, exposing multi-session, model selection and
 live inference streaming to the frontend.
 
 **Boundary note**: this directory is the **service layer** and may depend on

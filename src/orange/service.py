@@ -1,4 +1,4 @@
-﻿"""Service management: assemble scattered runtime components into one queryable,
+"""Service management: assemble scattered runtime components into one queryable,
 startable/stoppable service instance.
 
 Responsibilities (this is a **composition root**, not a new business concept):

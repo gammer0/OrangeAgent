@@ -1,4 +1,4 @@
-﻿"""Builtin tool implementations: the atomic capabilities an agent actually runs.
+"""Builtin tool implementations: the atomic capabilities an agent actually runs.
 
 Design principles:
 

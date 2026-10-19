@@ -1,4 +1,4 @@
-﻿"""Memory layer (ADT-5, group C).
+"""Memory layer (ADT-5, group C).
 
 See docs/02-data-structures/05-memory.md.
 
