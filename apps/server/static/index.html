@@ -593,6 +593,19 @@ async function selectSession(id) {
     updateUsage(data.tokens, data.capacity);
   } catch (e) { banner(`加载历史失败：${e.message}`); }
 
+  // The trace lives in its own store, so it is reloaded separately: a restart
+  // empties the live event queue but must not erase how a tool was found.
+  try {
+    const trace = await api(`/api/sessions/${id}/trace`);
+    state.trace = (trace.events || []).map((e) => ({
+      kind: e.kind,
+      payload: e.payload,
+      ts: e.ts,
+    }));
+    if (state.trace.length > MAX_TRACE) state.trace = state.trace.slice(-MAX_TRACE);
+    renderTrace();
+  } catch (e) { /* trace is diagnostic; a failure must not block the chat */ }
+
   openStream(id);
 }
 

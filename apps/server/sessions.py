@@ -329,6 +329,13 @@ class SessionRunner:
     #: is durable; everything from it on is still memory-only. This cursor is what
     #: makes persistence incremental instead of rewriting the whole history.
     persisted_count: int = 0
+    #: Trace events awaiting a flush to the ``trace_events`` table. They live here
+    #: (not in ``messages``) so the audit trail survives a restart without the
+    #: conversation inheriting the tree-descent scaffolding.
+    _trace_pending: list[tuple[str, dict[str, Any], float]] = field(
+        default_factory=list
+    )
+    _trace_lock: threading.Lock = field(default_factory=threading.Lock)
 
     _seq: int = 0
     _lock: threading.Lock = field(default_factory=threading.Lock)
@@ -504,7 +511,12 @@ class SessionRunner:
     # -------------------------------------------------------------- events
 
     def emit(self, kind: str, payload: dict[str, Any]) -> None:
-        """Publish one event to every current subscriber (dropping on overflow)."""
+        """Publish one event to every current subscriber and buffer it for storage.
+
+        Delivery and storage are both best-effort: a slow reader drops its oldest
+        event rather than stalling the producer, and the storage buffer is bounded
+        so a long turn cannot grow memory without limit.
+        """
         with self._lock:
             self._seq += 1
             event = SessionEvent(self._seq, time.time(), kind, payload)
@@ -513,6 +525,11 @@ class SessionRunner:
             if len(self._recent) > EVENT_REPLAY_MAX:
                 del self._recent[: len(self._recent) - EVENT_REPLAY_MAX]
             subscribers = list(self._subscribers)
+        # Durable audit trail: flushed to its own table at the next safe point.
+        with self._trace_lock:
+            self._trace_pending.append((kind, payload, event.ts))
+            if len(self._trace_pending) > EVENT_REPLAY_MAX:
+                del self._trace_pending[: len(self._trace_pending) - EVENT_REPLAY_MAX]
         for sub in subscribers:
             try:
                 sub.put_nowait(event)
@@ -596,11 +613,15 @@ class SessionRunner:
         satisfies H7. ``SystemMsg`` is skipped (H6): the context layer rebuilds it
         from the current tool tree on restore.
 
-        Tree descents **are** persisted: the trace the user reads must show the
-        full discovery path (``/tool`` → ``/tool/os`` → ... → leaf), and after a
-        restart that history is the only remaining evidence of how the tool was
-        found. Keeping them out of the *model's* context is a separate concern,
-        handled when a request is assembled.
+        Tree descents are **not** persisted, and that is a deliberate split:
+
+        * the conversation is the model's context, so a descent turn is pruned
+          the moment the tool it revealed is called -- storing it would only make
+          the next request re-read scaffolding that the discovered-tools
+          inventory already carries;
+        * the trace is the user's audit surface, so descent events go to the
+          separate ``trace_events`` table (see :meth:`persist_trace`) where they
+          survive a restart without polluting the conversation.
 
         Returns:
             The number of messages written by this call.
@@ -630,6 +651,33 @@ class SessionRunner:
             self.emit("error", {"message": f"persistence: {exc}"})
             return 0
         return len(pending)
+
+    def persist_trace(self) -> int:
+        """Flush buffered trace events to SQLite.
+
+        Trace events are written by :meth:`emit` into an in-memory buffer and
+        flushed here, at the same safe points as messages. Keeping them in a
+        separate table is what lets the conversation stay clean while the audit
+        trail remains durable.
+
+        Returns:
+            The number of events written by this call.
+        """
+        if self.store is None:
+            with self._trace_lock:
+                self._trace_pending.clear()
+            return 0
+
+        with self._trace_lock:
+            if not self._trace_pending:
+                return 0
+            batch = list(self._trace_pending)
+            self._trace_pending.clear()
+        try:
+            return self.store.append_trace_events(self.session_id, batch)
+        except Exception as exc:  # noqa: BLE001 - tracing must not break the turn
+            self.emit("error", {"message": f"trace persistence: {exc}"})
+            return 0
 
     # --------------------------------------------------------------- run
 
@@ -735,6 +783,7 @@ class SessionRunner:
             # authoritative once results are back. Flush whatever is still pending
             # so a crash right after this turn cannot lose the answer.
             self.persist_pending()
+            self.persist_trace()
 
     def _model_client(self) -> Any:
         """Adapt ReverseProxy to the orchestration layer's ``chat(messages)`` protocol."""
@@ -811,6 +860,7 @@ class SessionRunner:
         # are backfilled, so it flushes the assistant reply; the tool events are
         # emitted later by _on_batch_done.
         self.persist_pending()
+        self.persist_trace()
 
     def _on_descent(self, payload: str) -> None:
         """Record a descent's **leaves** (with schema) in the discovered-tools cache.
@@ -865,6 +915,49 @@ class SessionRunner:
     def discovered_rows(self) -> list[dict[str, Any]]:
         """Inventory projection for the request's trailing temporary injection."""
         return self.discovered.rows()
+
+    def restore_trace(self) -> list[dict[str, Any]]:
+        """Load this session's persisted trace events into the replay buffer.
+
+        The conversation and the trace are stored separately, so a restart has to
+        reload them independently: messages come back through
+        :meth:`SessionManager._restore_one`, trace events through here. Both end
+        up in :attr:`_recent`, which is what :meth:`subscribe` replays to a newly
+        connected browser -- meaning a restored session shows its full history,
+        descents included, without those descents ever entering the model's
+        context.
+        """
+        if self.store is None:
+            return []
+        try:
+            rows = self.store.load_trace_events(self.session_id)
+        except Exception:  # noqa: BLE001 - a damaged trace must not block restore
+            return []
+
+        restored: list[dict[str, Any]] = []
+        with self._lock:
+            self._recent.clear()
+            self._seq = 0
+            for row in rows:
+                try:
+                    payload = json.loads(row.payload)
+                except (ValueError, TypeError):
+                    continue
+                if not isinstance(payload, dict):
+                    continue
+                self._seq = max(self._seq, row.seq)
+                self._recent.append(
+                    SessionEvent(row.seq, row.created_at, row.kind, payload)
+                )
+                restored.append(
+                    {
+                        "seq": row.seq,
+                        "ts": row.created_at,
+                        "kind": row.kind,
+                        "payload": payload,
+                    }
+                )
+        return restored
 
     def mark_restored_descents(self) -> None:
         """Rebuild the descent-id set from restored history.
@@ -921,6 +1014,7 @@ class SessionRunner:
             )
         self._traced_count = len(messages)
         self.persist_pending()
+        self.persist_trace()
 
     def _on_inject(self, message: UserMsg, channel: str) -> None:
         self.emit("inject", {"channel": channel, "text": message.content})
@@ -1141,6 +1235,10 @@ class SessionManager:
         runner._traced_count = len(runner.messages)
         runner.state = "idle"
         runner.store = self.store
+        # Reload the audit trail from its own table. This is what makes the tree
+        # descents visible again after a restart even though they were pruned from
+        # the conversation before it was written.
+        runner.restore_trace()
         # A restored session never resumes by itself; it waits for the user.
         if self.registry is not None:
             core = Session(session_id=record.session_id, working_dir=self.workdir)

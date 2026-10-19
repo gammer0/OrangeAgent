@@ -72,6 +72,18 @@ CREATE TABLE IF NOT EXISTS messages (
 );
 
 CREATE INDEX IF NOT EXISTS idx_sessions_working_dir ON sessions(working_dir);
+
+CREATE TABLE IF NOT EXISTS trace_events (
+    session_id   TEXT NOT NULL,
+    seq          INTEGER NOT NULL,  -- monotonic within a session
+    kind         TEXT NOT NULL,     -- tool | assistant | route | ...
+    payload      TEXT NOT NULL,     -- JSON string
+    created_at   REAL NOT NULL,
+    PRIMARY KEY (session_id, seq),
+    FOREIGN KEY (session_id) REFERENCES sessions(session_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_trace_events_session ON trace_events(session_id);
 """
 
 MessageType = Literal["user", "assistant", "tool"]
@@ -92,6 +104,17 @@ class StoredMessage:
     tool_calls: str | None
     tool_call_id: str | None
     name: str | None
+    created_at: float
+
+
+@dataclass(frozen=True)
+class StoredTraceEvent:
+    """Read view of one row in the ``trace_events`` table."""
+
+    session_id: str
+    seq: int
+    kind: str
+    payload: str
     created_at: float
 
 
@@ -382,6 +405,74 @@ class SessionStore:
             )
             seqs.append(seq)
         return seqs
+
+    def append_trace_events(
+        self,
+        session_id: str,
+        events: Sequence[tuple[str, dict[str, Any], float]],
+    ) -> int:
+        """Append trace events to their own table.
+
+        Trace history and message history are deliberately separate. A tree
+        descent is *not* a message: once the tool it revealed has been called,
+        the descent turn is pruned from the conversation so the model never
+        re-reads it. But the user still needs to see how the tool was found,
+        including after a restart, so the event stream is stored here instead.
+
+        Args:
+            session_id: Owning session.
+            events: ``(kind, payload, created_at)`` triples in emission order.
+
+        Returns:
+            The number of rows written.
+        """
+        if not events:
+            return 0
+        import json as _json
+
+        conn = self._connect()
+        with self._write_lock:
+            row = conn.execute(
+                "SELECT COALESCE(MAX(seq), 0) AS m FROM trace_events WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()
+            start = int(row["m"])
+            rows = [
+                (
+                    session_id,
+                    start + offset,
+                    kind,
+                    _json.dumps(payload, ensure_ascii=False),
+                    created_at,
+                )
+                for offset, (kind, payload, created_at) in enumerate(events, start=1)
+            ]
+            conn.executemany(
+                "INSERT OR REPLACE INTO trace_events "
+                "(session_id, seq, kind, payload, created_at) VALUES (?, ?, ?, ?, ?)",
+                rows,
+            )
+            conn.commit()
+        return len(rows)
+
+    def load_trace_events(self, session_id: str) -> list[StoredTraceEvent]:
+        """Return a session's stored trace events in ascending ``seq`` order."""
+        conn = self._connect()
+        rows = conn.execute(
+            "SELECT session_id, seq, kind, payload, created_at FROM trace_events "
+            "WHERE session_id = ? ORDER BY seq ASC",
+            (session_id,),
+        ).fetchall()
+        return [
+            StoredTraceEvent(
+                session_id=r["session_id"],
+                seq=int(r["seq"]),
+                kind=r["kind"],
+                payload=r["payload"],
+                created_at=float(r["created_at"]),
+            )
+            for r in rows
+        ]
 
     def append_group(
         self,

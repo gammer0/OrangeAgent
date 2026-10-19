@@ -298,6 +298,21 @@ def create_app(workdir: str | Path | None = None) -> FastAPI:
         runner.cancel()
         return {"cancelling": True}
 
+    @app.get("/api/sessions/{session_id}/trace")
+    async def get_trace(session_id: str) -> dict[str, Any]:
+        """Persisted audit trail (tool activity, routing, tree descents).
+
+        Kept apart from the message history on purpose: the conversation is the
+        model's context and prunes discovery scaffolding once it has served its
+        purpose, while the trace is what the user reads to see how a tool was
+        found -- including after a restart.
+        """
+        runner = _require(manager_or_503(), session_id)
+        events = [
+            event.to_dict() for event in list(runner._recent)  # noqa: SLF001 - same app
+        ]
+        return {"session_id": session_id, "events": events}
+
     # ---- SSE ----
 
     @app.get("/api/sessions/{session_id}/events")
