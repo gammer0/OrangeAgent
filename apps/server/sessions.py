@@ -87,6 +87,22 @@ EVENT_REPLAY_MAX = 500
 #: the resource roots (``/tool``, ``/mcp``, ``/skill``), forcing a descent.
 INDEX_DEPTH = 1
 
+#: Seconds a turn may go without any forward progress before it is abandoned.
+#: Measured from the last delta or completed batch, not from the turn start, so a
+#: long answer that is still streaming is never killed. Chosen well above the
+#: provider's own HTTP timeout (60 s) so the transport usually fails first and
+#: this stays a backstop for a genuinely wedged thread.
+#: Seconds a turn may go without any forward progress before it is abandoned.
+#: Measured from the last delta or completed batch, not from the turn start, so a
+#: long answer that is still streaming is never killed. Chosen well above the
+#: provider's own HTTP timeout (60 s) so the transport usually fails first and
+#: this stays a backstop for a genuinely wedged thread.
+TURN_TIMEOUT_S = 300.0
+
+#: How often the watchdog checks for stalled turns. Cheap (a dict scan of the
+#: resident runners), so it can run far more often than the idle sweeper.
+WATCHDOG_INTERVAL_S = 15.0
+
 
 @dataclass(frozen=True, slots=True)
 class SessionEvent:
@@ -304,6 +320,12 @@ class SessionRunner:
     tools: DemoToolRegistry
     model: str
     capacity: int = 32_768
+    #: Seconds a turn may go without forward progress before the watchdog
+    #: abandons it. The reasoning thread is a daemon that blocks on HTTP, so a
+    #: half-open connection would otherwise hold the session -- and one of the
+    #: limited runner slots -- forever; the idle sweeper cannot help because a
+    #: wedged session is ``active``, never ``idle``.
+    turn_timeout_s: float = TURN_TIMEOUT_S
 
     inbox: Inbox = field(default_factory=Inbox)
     messages: list[Message] = field(default_factory=list)
@@ -341,6 +363,14 @@ class SessionRunner:
     _lock: threading.Lock = field(default_factory=threading.Lock)
     _thread: threading.Thread | None = None
     _cancelled: bool = False
+    #: Wall-clock start of the current turn; ``None`` when no turn is running.
+    #: The watchdog compares this against :attr:`turn_timeout_s` to reclaim a
+    #: session whose reasoning thread has wedged.
+    _turn_started_at: float | None = None
+    #: Wall-clock stamp of the most recent forward progress (a model delta or a
+    #: completed batch). A long but healthy turn keeps this fresh, so the
+    #: watchdog only fires on genuine stalls.
+    _last_progress_at: float = 0.0
     #: Message index -> timestamp (for the frontend to render history times
     #: without polluting core message types)
     _timestamps: dict[int, float] = field(default_factory=dict)
@@ -695,8 +725,11 @@ class SessionRunner:
         if self.running:
             return False
         self._cancelled = False
+        now = time.time()
+        self._turn_started_at = now
+        self._last_progress_at = now
         self.messages.append(UserMsg(content=text))
-        self._timestamps[len(self.messages) - 1] = time.time()
+        self._timestamps[len(self.messages) - 1] = now
         # P1: persist the user turn immediately -- if the process dies mid-reasoning,
         # the request the user typed must survive.
         self.persist_pending()
@@ -705,6 +738,62 @@ class SessionRunner:
         # the frontend.
         self._thread = threading.Thread(target=self._run_once, daemon=True)
         self._thread.start()
+        return True
+
+    def stalled_for(self, now: float | None = None) -> float | None:
+        """Seconds since this turn last made progress; ``None`` when idle.
+
+        The reasoning thread blocks on the network, so a half-open connection
+        would keep it (and the session's runner slot) forever. This is the input
+        to :meth:`reap_if_stalled`, which the manager calls periodically.
+
+        Args:
+            now: Logical current time; defaults to ``time.time()``.
+
+        Returns:
+            Idle-while-running seconds, or ``None`` if no turn is in flight.
+        """
+        if not self.running or self.state != "running":
+            return None
+        current = time.time() if now is None else now
+        anchor = self._last_progress_at or self._turn_started_at or current
+        return max(0.0, current - anchor)
+
+    def reap_if_stalled(self, now: float | None = None) -> bool:
+        """Abandon the current turn if it has made no progress for too long.
+
+        Eviction cannot help here: ``sweep`` only reclaims **idle** sessions, and
+        a wedged turn is ``active`` by definition. So the runner has to police
+        itself, otherwise ``max_sessions`` slots leak one by one.
+
+        The thread is a daemon and may stay blocked on a dead socket even after
+        being abandoned; what matters is that the session becomes reusable again,
+        which is why the state is reset here rather than waiting on the thread.
+
+        Args:
+            now: Logical current time; defaults to ``time.time()``.
+
+        Returns:
+            ``True`` when the turn was abandoned.
+        """
+        stalled = self.stalled_for(now)
+        if stalled is None or stalled <= self.turn_timeout_s:
+            return False
+
+        seconds = round(stalled, 1)
+        self._cancelled = True
+        self._turn_started_at = None
+        self._last_progress_at = 0.0
+        self.emit(
+            "error",
+            {
+                "message": (
+                    f"推理超时：{seconds}s 无进展，已放弃本轮。"
+                    "会话可以继续使用。"
+                )
+            },
+        )
+        self._set_state("error", "turn_timeout")
         return True
 
     def cancel(self) -> None:
@@ -789,6 +878,10 @@ class SessionRunner:
             # so a crash right after this turn cannot lose the answer.
             self.persist_pending()
             self.persist_trace()
+            # The turn is over however it ended; clear the watchdog anchors so a
+            # later, healthy turn is not judged by this one's timestamps.
+            self._turn_started_at = None
+            self._last_progress_at = 0.0
 
     def _model_client(self) -> Any:
         """Adapt ReverseProxy to the orchestration layer's ``chat(messages)`` protocol."""
@@ -1044,6 +1137,9 @@ class SessionRunner:
         self._traced_count = len(messages)
         self.persist_pending()
         self.persist_trace()
+        # A finished batch is forward progress even when the model produced no
+        # text (pure tool-call turns), so the watchdog must see it too.
+        self._last_progress_at = time.time()
 
     def _on_delta(self, text: str) -> None:
         """Forward one text fragment of the reply currently being generated.
@@ -1053,6 +1149,9 @@ class SessionRunner:
         the answer in the message table and in the trace. This event exists only
         so the browser can render the text as it arrives.
         """
+        # A fragment proves the request is alive, which is exactly what the
+        # watchdog needs to distinguish "slow" from "wedged".
+        self._last_progress_at = time.time()
         self.emit("delta", {"text": text})
 
     def _on_inject(self, message: UserMsg, channel: str) -> None:
@@ -1187,6 +1286,52 @@ class SessionManager:
             self.registry = None
         # SQLite persistence (P1): None means memory-only (e.g. read-only workdir).
         self.store = self._open_store()
+        #: Background thread that abandons stalled turns. The core sweeper only
+        #: reclaims idle sessions, so a turn wedged on a dead socket would hold
+        #: its runner slot forever without this.
+        self._watchdog: threading.Thread | None = None
+        self._watchdog_stop = threading.Event()
+
+    def watch_stalls(self, now: float | None = None) -> list[str]:
+        """Abandon every turn that has stopped making progress.
+
+        Args:
+            now: Logical current time, for tests.
+
+        Returns:
+            The session ids whose turns were abandoned.
+        """
+        reaped: list[str] = []
+        with self._lock:
+            runners = list(self._sessions.values())
+        for runner in runners:
+            try:
+                if runner.reap_if_stalled(now):
+                    reaped.append(runner.session_id)
+            except Exception:  # noqa: BLE001 - one bad runner must not stop the scan
+                continue
+        return reaped
+
+    def start_watchdog(self, interval_s: float = WATCHDOG_INTERVAL_S) -> None:
+        """Start the stall watchdog (idempotent)."""
+        if self._watchdog is not None and self._watchdog.is_alive():
+            return
+        self._watchdog_stop.clear()
+
+        def loop() -> None:
+            while not self._watchdog_stop.wait(interval_s):
+                try:
+                    self.watch_stalls()
+                except Exception:  # noqa: BLE001 - the watchdog must never die
+                    continue
+
+        self._watchdog = threading.Thread(target=loop, daemon=True, name="harness-watchdog")
+        self._watchdog.start()
+
+    def stop_watchdog(self) -> None:
+        """Signal the watchdog to exit (idempotent)."""
+        self._watchdog_stop.set()
+        self._watchdog = None
 
     def _open_store(self) -> SessionStore | None:
         """Open the session database; ``None`` degrades to memory-only operation.

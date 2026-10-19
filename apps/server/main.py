@@ -145,7 +145,15 @@ def create_app(workdir: str | Path | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         state.manager, state.error = _build_manager(state.workdir)
+        if state.manager is not None:
+            # Start the stall watchdog: a turn blocked on a dead connection holds
+            # its runner slot, and the idle sweeper cannot reclaim an ``active``
+            # session. Without this the service degrades quietly, one slot at a
+            # time, until no session can start.
+            state.manager.start_watchdog()
         yield
+        if state.manager is not None:
+            state.manager.stop_watchdog()
         state.manager = None
 
     app = FastAPI(
