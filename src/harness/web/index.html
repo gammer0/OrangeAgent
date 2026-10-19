@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Harness Console</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%2316181b'/%3E%3Cpath d='M9 9v14M23 9v14M9 16h14' stroke='%23f0a742' stroke-width='3' stroke-linecap='round'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+
+<header>
+  <div class="brand">
+    <b>Harness</b>
+    <span>console</span>
+  </div>
+  <div class="pulse" id="pulse" title="服务状态"></div>
+  <div class="head-meta">
+    <span id="health-text">连接中…</span>
+    <span class="sep">·</span>
+    <span id="tool-count">—</span>
+  </div>
+
+  <div class="spacer"></div>
+
+  <label class="head-meta" for="model-select">模型</label>
+  <select id="model-select" title="新建会话使用的模型"></select>
+
+  <button class="btn ghost" id="btn-settings" title="超参数设置">
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+      <circle cx="12" cy="12" r="3"></circle>
+      <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+    </svg>
+    设置
+  </button>
+
+  <button class="btn primary" id="btn-new">新建会话</button>
+</header>
+
+<aside id="list">
+  <div class="pane-head">
+    会话
+    <span class="count" id="session-count">0</span>
+  </div>
+  <div id="session-items"></div>
+</aside>
+
+<main id="chat">
+  <div id="stream">
+    <div class="placeholder" id="placeholder">
+      <div class="big">选择或新建一个会话</div>
+      <div class="hint">
+        左侧是会话列表。选中一个会话后即可开始对话；<br>
+        <kbd>Enter</kbd> 换行 · <kbd>Ctrl</kbd>+<kbd>Enter</kbd> 发送
+      </div>
+    </div>
+  </div>
+
+  <div id="composer">
+    <div class="composer-inner">
+      <div class="banner" id="banner"></div>
+      <div class="input-wrap">
+        <textarea id="input" rows="1" placeholder="输入消息…" disabled></textarea>
+        <button class="btn primary" id="btn-send" disabled>发送</button>
+        <button class="btn danger" id="btn-stop" disabled>中止</button>
+      </div>
+      <div class="hint-row">
+        <span><kbd>Enter</kbd> 换行</span>
+        <span><kbd>Ctrl</kbd>+<kbd>Enter</kbd> 发送</span>
+        <span><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Enter</kbd> 立即插入</span>
+      </div>
+    </div>
+  </div>
+</main>
+
+<aside id="side">
+  <div class="tabs">
+    <button class="tab active" data-pane="trace">轨迹 <span class="n" id="trace-count">0</span></button>
+    <button class="tab" data-pane="context">上下文 <span class="n" id="ctx-count">0</span></button>
+  </div>
+  <div class="tab-body">
+    <section class="pane active" id="pane-trace">
+      <div class="meter-row">
+        <span>上下文水位</span>
+        <span class="val" id="usage-text">—</span>
+      </div>
+      <div class="meter" id="usage-meter"><i></i></div>
+      <div id="trace-list"><div class="empty">暂无事件<br>工具调用与树状下钻会显示在这里</div></div>
+    </section>
+    <section class="pane" id="pane-context">
+      <div id="context-list"><div class="empty">暂无消息</div></div>
+    </section>
+  </div>
+</aside>
+
+<div class="overlay" id="settings-overlay">
+  <div class="modal">
+    <div class="modal-head">
+      <h2>超参数设置</h2>
+      <span class="path" id="settings-file"></span>
+      <div class="spacer"></div>
+      <button class="icon-btn" id="settings-close" title="关闭">✕</button>
+    </div>
+    <div class="modal-body" id="settings-body">
+      <div class="empty">加载中…</div>
+    </div>
+    <div class="modal-foot">
+      <span class="msg" id="settings-msg">标有「重启生效」的项目需重启服务</span>
+      <button class="btn ghost" id="settings-reset">全部恢复默认</button>
+      <button class="btn primary" id="settings-save">保存</button>
+    </div>
+  </div>
+</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
