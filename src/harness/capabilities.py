@@ -12,7 +12,12 @@ This module solves **one problem**: which ``ToolDef`` values the agent gets.
         ├── tools   : list[ToolDef]    -- first path segment tool / mcp
         └── skills  : list[SkillDef]   -- first path segment skill; SKILL.md read on demand
 
-    <workdir>/.agent/capabilities.json    -- persisted (idempotent, Git-diffable)
+    <home>/capabilities.json    -- persisted (idempotent, Git-diffable)
+
+``<home>`` is the system data directory (``harness.paths``). A project that
+already commits ``.agent/capabilities.json`` keeps being read from there, so
+repository-provided capability sets still work -- we just never create that
+directory inside someone else's project.
 
 Design conventions:
 
@@ -40,6 +45,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from harness import paths
 from harness.permission import Permission
 from harness.tool_tree import ToolDef, ToolTreeError, _reject_multiline
 from harness.tools_builtin import TOOL_SPECS
@@ -66,7 +72,7 @@ __all__ = [
     "load_ext_callable",
 ]
 
-#: Directory holding the capability manifest (same ``.agent`` as ``memory.py``).
+#: Directory holding the capability manifest (legacy project override only)
 CAPABILITY_DIR_NAME = ".agent"
 
 #: Manifest file name.
@@ -243,7 +249,7 @@ class SkillDef:
         if group and not group.startswith("skill"):
             raise CapabilityError(f"a skill group must start with 'skill': {self.group!r}")
         object.__setattr__(self, "group", group)
-        object.__setattr__(self, "dir", self.dir or f".agent/skills/{self.name}")
+        object.__setattr__(self, "dir", self.dir or f"skills/{self.name}")
 
     @property
     def path(self) -> str:
@@ -281,9 +287,13 @@ class SkillDef:
 
 
 def _skill_reader(workdir: str, rel_dir: str):
-    """Build a skill reader: only files inside that skill's directory may be read."""
+    """Build a skill reader: only files inside that skill's directory may be read.
 
-    base = (Path(workdir) / rel_dir).resolve()
+    ``rel_dir`` is relative to the skill root (``paths.skills_root``), which lives
+    in the system data directory, not in the user's project.
+    """
+
+    base = (skills_dir(workdir) / Path(rel_dir).name).resolve()
 
     def read(file: str = "SKILL.md") -> str:
         target = (base / file).resolve()
@@ -499,8 +509,8 @@ class CapabilityManifest:
 
 
 def manifest_path(workdir: str | Path) -> Path:
-    """Manifest path: ``<workdir>/.agent/capabilities.json``."""
-    return Path(workdir).resolve() / CAPABILITY_DIR_NAME / CAPABILITY_FILENAME
+    """Manifest path: project-local ``.agent/capabilities.json`` if present, else ``<home>``."""
+    return paths.capabilities_path(workdir)
 
 
 def save_manifest(manifest: CapabilityManifest, workdir: str | Path) -> Path:
@@ -806,12 +816,12 @@ def build_builtin_tool(path: str, workdir: str) -> ToolDef:
 
 
 def skills_dir(workdir: str | Path) -> Path:
-    """Skill root directory: ``<workdir>/.agent/skills``."""
-    return Path(workdir).resolve() / CAPABILITY_DIR_NAME / "skills"
+    """Skill root directory: project-local ``.agent/skills`` if present, else ``<home>/skills``."""
+    return paths.skills_root(workdir)
 
 
 def write_skill_files(workdir: str | Path, name: str, files: dict[str, str]) -> Path:
-    """Write ``filename -> content`` into ``.agent/skills/<name>`` and return the directory.
+    """Write ``filename -> content`` into ``<skills>/<name>`` and return the directory.
 
     Raises:
         CapabilityError: A filename contains a path separator (escaping is forbidden).

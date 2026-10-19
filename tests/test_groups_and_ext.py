@@ -19,15 +19,32 @@ from harness.capabilities import (
     save_manifest,
 )
 from harness.mcp_client import McpServerConfig
-from harness.permission import PermissionDenied, visible
+from harness.permission import Permission, PermissionDenied, visible
 from harness.permission_store import (
     load_permissions,
     permissions_path,
     set_grant,
 )
-from harness.tool_tree import FlatStore, ToolTree, build_tree
+from harness.tool_tree import FlatStore, ToolDef, ToolTree, build_tree
 
 FIXTURES = Path(__file__).parent / "fixtures"
+
+
+def _fake_tool(path: str, caps: list[str] | None = None) -> ToolDef:
+    """Build a minimal tool definition for a path, without a real implementation.
+
+    These tests exercise grouping and permission logic, not tool behaviour, so a
+    stub keeps them independent of which tools (if any) the package ships.
+    """
+    return ToolDef(
+        tool_id="t" + path.replace("/", "_"),
+        path=path,
+        fn=lambda **_: "",
+        caps=list(caps or ["read"]),
+        permission=Permission(src=path.strip("/").split("/")[0], caps=list(caps or ["read"])),
+        side_effect_scope="project",
+        description=f"stub for {path}",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -215,6 +232,13 @@ class TestMcp:
 
 
 class TestPermissionStore:
+    @pytest.fixture(autouse=True)
+    def _isolated_home(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        """权限文件在系统数据目录（所有项目共享），每个用例必须用独立目录。"""
+        home = tmp_path / "home"
+        monkeypatch.setenv("HARNESS_HOME", str(home))
+        return home
+
     def test_default_allows_everything(self, tmp_path: Path) -> None:
         perms = load_permissions(tmp_path, "local")
         assert perms.grants == {}
@@ -240,11 +264,11 @@ class TestPermissionStore:
         assert "/tool/os/shell/run" not in perms.grants
 
     def test_ancestor_denial_hides_subtree(self, tmp_path: Path) -> None:
-        set_grant(tmp_path, "/tool/fluid", allowed=False, agent_id="local")
+        set_grant(tmp_path, "/tool/net", allowed=False, agent_id="local")
         perms = load_permissions(tmp_path, "local")
-        assert visible("/tool/fluid", perms) is False
-        assert visible("/tool/fluid/check", perms) is False
-        assert visible("/tool/game/snake/check", perms) is True
+        assert visible("/tool/net", perms) is False
+        assert visible("/tool/net/http/get", perms) is False
+        assert visible("/tool/os/file/read", perms) is True
 
     def test_rejects_relative_path(self, tmp_path: Path) -> None:
         with pytest.raises(ValueError):
@@ -304,9 +328,13 @@ class TestGroupLevelDenial:
     """
 
     def _tree_with(self, tmp_path: Path, grants: dict[str, bool]) -> ToolTree:
-        """构造含多层级分组的树。"""
+        """构造含多层级分组的树。
+
+        用测试自带的假工具而不是内置工具：本部署不随包发布任何内置工具，
+        但分组级禁用是纯粹的权限逻辑，不应依赖具体工具是否存在。
+        """
         from harness.permission import AgentPermissions
-        from harness.tools_builtin import build_tool
+
         manifest = CapabilityManifest()
         for path in (
             "/tool/os/file/read",
@@ -314,7 +342,7 @@ class TestGroupLevelDenial:
             "/tool/net/http/get",
             "/tool/net/http/post",
         ):
-            manifest.add_tool(build_tool(path, str(tmp_path)))
+            manifest.add_tool(_fake_tool(path))
         store = FlatStore(manifest.to_tooldefs(str(tmp_path)))
         return build_tree(store, AgentPermissions(agent_id="t", grants=grants))
 
@@ -359,13 +387,16 @@ class TestGroupLevelDenial:
         with pytest.raises(PermissionDenied):
             tree.resolve("/tool/net/http/get")
 
-    def test_group_denial_survives_persistence(self, tmp_path: Path) -> None:
+    def test_group_denial_survives_persistence(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """分组拒绝必须能落盘并重新读回。"""
         from harness.permission_store import load_permissions, set_grant
 
-        (tmp_path / ".agent").mkdir(parents=True, exist_ok=True)
+        monkeypatch.setenv("HARNESS_HOME", str(tmp_path / "home"))
         set_grant(tmp_path, "/tool/net", allowed=False, agent_id="local")
 
         perms = load_permissions(tmp_path, "local")
         assert perms.grants.get("/tool/net") is False
         assert visible("/tool/net/http/get", perms) is False
+        assert not (tmp_path / ".agent").exists()

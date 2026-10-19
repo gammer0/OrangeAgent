@@ -1,4 +1,7 @@
-"""Permission persistence: store ``AgentPermissions.grants`` in ``.agent/permissions.json``.
+"""Permission persistence: store ``AgentPermissions.grants`` in ``permissions.json``.
+
+Data lives in the system data directory (``harness.paths``); a project-local
+``.agent/permissions.json`` is still read when present.
 
 See section 5 of the tool-groups-and-external-capabilities doc.
 
@@ -22,6 +25,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from harness import paths
 from harness.permission import AgentPermissions, is_absolute_path
 
 __all__ = [
@@ -34,7 +38,7 @@ __all__ = [
     "set_grant",
 ]
 
-#: Directory holding the permission file (the same ``.agent`` as the capability manifest).
+#: Legacy directory name (project-local override only).
 PERMISSION_DIR_NAME = ".agent"
 
 #: Permission file name.
@@ -51,10 +55,8 @@ WEB_AGENT = "web"
 
 
 def permissions_path(workdir: str | Path) -> Path:
-    """Permission file path: ``<workdir>/.agent/permissions.json``."""
-    return (
-        Path(workdir).resolve() / PERMISSION_DIR_NAME / PERMISSION_FILENAME
-    )
+    """Permission file path: project-local override if present, else ``<home>/permissions.json``."""
+    return paths.permissions_path(workdir)
 
 
 def _read_raw(workdir: str | Path) -> dict[str, Any]:

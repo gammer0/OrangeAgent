@@ -1,7 +1,9 @@
-"""工作记忆文件自动创建的测试。
+﻿"""工作记忆文件自动创建的测试。
 
 关键约束：**只在缺失时创建，绝不覆盖已有内容**——工作记忆跨会话共享，
 覆盖等于抹掉别的会话刚写下的结论。
+
+另：数据目录不在用户工作目录内，见 ``harness.paths``。
 """
 
 from __future__ import annotations
@@ -16,6 +18,7 @@ from harness.memory import (
     read_working_memory,
     work_memory_path,
 )
+from harness.paths import harness_home
 from harness.service import build_service
 
 
@@ -27,16 +30,17 @@ class TestEnsureWorkingMemory:
         assert path.is_file()
         assert path.read_text(encoding="utf-8") == WORK_MEMORY_TEMPLATE
 
-    def test_creates_agent_dir(self, tmp_path: Path) -> None:
-        """``.agent`` 目录不存在时一并创建。"""
-        assert not (tmp_path / ".agent").exists()
+    def test_creates_work_md_without_agent_dir(self, tmp_path: Path) -> None:
+        """直接在工作目录根部创建 WORK.md，不创建 .agent 子目录。"""
+        assert not (tmp_path / "WORK.md").exists()
         ensure_working_memory(tmp_path)
-        assert (tmp_path / ".agent").is_dir()
+        assert (tmp_path / "WORK.md").is_file()
+        assert not (tmp_path / ".agent").exists()
 
     def test_keeps_existing_content(self, tmp_path: Path) -> None:
         """已有内容必须原样保留。"""
         target = work_memory_path(tmp_path)
-        target.parent.mkdir(parents=True)
+        target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text("我自己写的内容\n第二行", encoding="utf-8")
 
         path, created = ensure_working_memory(tmp_path)
@@ -46,7 +50,7 @@ class TestEnsureWorkingMemory:
     def test_keeps_real_looking_memory(self, tmp_path: Path) -> None:
         """真实工作记忆形态（多级标题 + 列表）也不得被模板覆盖。"""
         target = work_memory_path(tmp_path)
-        target.parent.mkdir(parents=True)
+        target.parent.mkdir(parents=True, exist_ok=True)
         original = (
             "# 工作记忆\n\n"
             "## 最终结构\n\n"
@@ -103,13 +107,16 @@ class TestServiceIntegration:
         try:
             assert service.work_memory_created is True
             assert service.work_memory == work_memory_path(tmp_path)
-            assert work_memory_path(tmp_path).is_file()
+            assert (tmp_path / "WORK.md").is_file()
+            # 不建 .agent，且全局数据（数据库等）也不落在项目里
+            assert not (tmp_path / ".agent").exists()
+            assert not (tmp_path / "harness.db").exists()
         finally:
             service.close()
 
     def test_service_preserves_existing(self, tmp_path: Path) -> None:
         target = work_memory_path(tmp_path)
-        target.parent.mkdir(parents=True)
+        target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text("已有结论：别动我", encoding="utf-8")
 
         service = build_service(tmp_path, load_model=False)

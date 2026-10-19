@@ -31,6 +31,7 @@ kind         Meaning
 from __future__ import annotations
 
 import contextlib
+import json
 import queue
 import threading
 import time
@@ -41,6 +42,7 @@ from typing import Any
 
 from harness.capabilities import CapabilityError, CapabilityManifest, load_manifest
 from harness.context import ContextAssembler, SystemPromptParts
+from harness.discovery import DiscoveredTools, ToolDiscovery
 from harness.executor import execute_batch
 from harness.inbox import Inbox
 from harness.jev import JevRouter
@@ -80,6 +82,10 @@ EVENT_QUEUE_MAX = 2_000
 
 #: Number of recent events retained for replay to a late or reconnecting client.
 EVENT_REPLAY_MAX = 500
+
+#: How deep the tool index goes when advertised to the model. ``1`` exposes only
+#: the resource roots (``/tool``, ``/mcp``, ``/skill``), forcing a descent.
+INDEX_DEPTH = 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -222,13 +228,39 @@ class DemoToolRegistry:
     # ---- resolver used by AgentLoop ----
 
     def resolve(self, call: ToolCall) -> Any:
-        """Resolve a ToolCall into an executable definition."""
-        return self.store.by_path(call.name)
+        """Resolve a ToolCall into an executable definition.
 
-    def tool_specs(self) -> list[dict[str, Any]]:
-        """Export OpenAI tool declarations for model requests."""
+        Delegates to the tree rather than the flat store so that intermediate
+        paths come back with their descent function bound; calling ``/tool/os``
+        then lists its children instead of failing.
+        """
+        return self.tree.resolve(call.name)
+
+    def tool_specs(
+        self,
+        discovered: tuple[set[str], object] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Export OpenAI tool declarations for model requests.
+
+        The shallow index (resource roots) is always advertised, and so is
+        **everything discovered so far**. Declaring only the roots is not enough:
+        after descending to ``/tool`` the model learns ``/tool/os`` exists, but an
+        undeclared name cannot be called -- the model then falls back to repeating
+        ``/tool`` and never reaches a leaf (observed: nine descents, zero tools
+        called).
+
+        Args:
+            discovered: Optional ``(expanded_paths, inventory)`` pair. Intermediate
+                paths found by descent stay callable, and leaf tools found by
+                descent become callable; both are layered on top of the roots.
+        """
         specs: list[dict[str, Any]] = []
-        for entry in self.store.active_paths().values():
+        seen: set[str] = set()
+
+        def add(entry: Any) -> None:
+            if entry.path in seen:
+                return
+            seen.add(entry.path)
             specs.append(
                 {
                     "type": "function",
@@ -239,6 +271,20 @@ class DemoToolRegistry:
                     },
                 }
             )
+
+        for entry in self.tree.index_specs(depth=INDEX_DEPTH):
+            add(entry)
+
+        if discovered is not None:
+            expanded, inventory = discovered
+            paths = sorted(expanded)
+            paths += getattr(inventory, "paths", lambda: [])()
+            for path in paths:
+                try:
+                    add(self.tree.resolve(path))
+                except Exception:  # noqa: BLE001 - a stale path must not break the request
+                    continue
+
         return specs
 
 
@@ -269,6 +315,16 @@ class SessionRunner:
     core_session: Any = None
     #: SQLite persistence (P1). ``None`` degrades to memory-only operation.
     store: Any = None
+    #: Discovered-tools inventory: children returned by descents. Injected as a
+    #: trailing temporary section, never written into the message list.
+    discovered: DiscoveredTools = field(default_factory=DiscoveredTools)
+    #: Tool-call ids belonging to tree descents. They stay in the live message
+    #: list (the model needs the children) but are skipped when persisting.
+    _descent_call_ids: set[str] = field(default_factory=set)
+    #: Intermediate paths the model has opened. These are not capabilities and are
+    #: not cached, but they must be declared as callable so the model can descend
+    #: further -- an undeclared name cannot be invoked.
+    _expanded_paths: set[str] = field(default_factory=set)
     #: Number of messages already written to SQLite. Everything before this index
     #: is durable; everything from it on is still memory-only. This cursor is what
     #: makes persistence incremental instead of rewriting the whole history.
@@ -303,7 +359,10 @@ class SessionRunner:
         )
         self.system = self.assembler.build_system(
             SystemPromptParts(
-                tool_index=self.tools.tree.tree_index(depth=0),
+                # Shallow index: only the resource roots. The model discovers
+                # leaves by calling an intermediate path, which returns its
+                # children (see ToolDef.with_query).
+                tool_index=self.tools.tree.tree_index(depth=INDEX_DEPTH),
                 working_dir=self.workdir,
                 goal=None,
             )
@@ -537,6 +596,12 @@ class SessionRunner:
         satisfies H7. ``SystemMsg`` is skipped (H6): the context layer rebuilds it
         from the current tool tree on restore.
 
+        Tree descents **are** persisted: the trace the user reads must show the
+        full discovery path (``/tool`` → ``/tool/os`` → ... → leaf), and after a
+        restart that history is the only remaining evidence of how the tool was
+        found. Keeping them out of the *model's* context is a separate concern,
+        handled when a request is assembled.
+
         Returns:
             The number of messages written by this call.
         """
@@ -545,11 +610,13 @@ class SessionRunner:
         anchor = self.persisted_count
         if anchor >= len(self.messages):
             return 0
-        pending = [
+
+        pending: list[Message] = [
             message
             for message in self.messages[anchor:]
             if not isinstance(message, SystemMsg)
         ]
+
         # Advance the cursor even when only a SystemMsg was pending, otherwise the
         # next call would rescan the same slice forever.
         self.persisted_count = len(self.messages)
@@ -602,6 +669,9 @@ class SessionRunner:
         # past what has already been announced), so it must not be reset here:
         # start() has already appended this turn's UserMsg.
         self._calls_by_id.clear()
+        # Note: _descent_call_ids is intentionally NOT cleared. It holds descents
+        # from earlier turns and from restored history, which must stay known so
+        # they are omitted from this request's projection.
 
         hooks = LoopHooks(
             on_assistant=self._on_assistant,
@@ -610,6 +680,7 @@ class SessionRunner:
             on_inject=self._on_inject,
             on_abort=self._on_abort,
             on_summary=self._on_summary,
+            on_descent=self._on_descent,
         )
 
         controller = StepController(max_steps=20)
@@ -627,6 +698,10 @@ class SessionRunner:
             tool_count_provider=lambda: len(self.tools.store.active_paths()),
             history_tokens_provider=lambda n: self.assembler.estimate(self.messages),
         )
+        # Tell the loop which paths are descents, so their turns can be omitted
+        # from the model's context while staying in the user's trace.
+        loop.descent_paths = self.tools.tree.abstract_paths()
+        loop.descent_call_ids = self._descent_call_ids
 
         try:
             # Pass the full history (including the UserMsg just appended);
@@ -673,8 +748,13 @@ class SessionRunner:
                 response = self.owner.proxy.chat(
                     messages,
                     session_id=session_id,
-                    tools=self.owner.tools.tool_specs(),
+                    # Declare the roots plus everything discovered so far, so a
+                    # node the model just learned about is actually callable.
+                    tools=self.owner.tools.tool_specs(
+                        (self.owner._expanded_paths, self.owner.discovered)
+                    ),
                     model=self.owner.model,
+                    discovered=self.owner.discovered_rows(),
                 )
                 return response.message
 
@@ -731,6 +811,89 @@ class SessionRunner:
         # are backfilled, so it flushes the assistant reply; the tool events are
         # emitted later by _on_batch_done.
         self.persist_pending()
+
+    def _on_descent(self, payload: str) -> None:
+        """Record a descent's **leaves** (with schema) in the discovered-tools cache.
+
+        The descent turn stays in the live message list (the model needs the
+        children it just asked for), but :meth:`persist_pending` skips it so the
+        stored transcript only contains real work.
+
+        Each leaf is stored **together with its parameter schema**: a discovered
+        tool must be immediately callable, otherwise the model would have to
+        descend again merely to learn the arguments.
+
+        Abstract children are ignored. They are locations in the tree, not
+        capabilities, so caching them would consume slots that real tools need
+        and would replay paths the model must still expand. Whether a node is a
+        location or a capability is decided by ``kind`` alone.
+        """
+        try:
+            data = json.loads(payload)
+        except (ValueError, TypeError):
+            return
+        children = data.get("children")
+        if not isinstance(children, list):
+            return
+
+        step = len(self.messages)
+        parent = data.get("path")
+        if isinstance(parent, str):
+            # Remember the parent so it stays callable for further descents.
+            self._expanded_paths.add(parent)
+
+        for child in children:
+            path = child.get("path")
+            if not isinstance(path, str):
+                continue
+            if child.get("kind") != "leaf":
+                # Intermediate nodes are not capabilities, so they never enter the
+                # cache -- but they must be callable for the next descent.
+                self._expanded_paths.add(path)
+                continue
+            self.discovered.upsert(
+                ToolDiscovery(
+                    path=path,
+                    description=str(child.get("description") or ""),
+                    kind="leaf",
+                    first_seen_step=step,
+                    last_used_step=step,
+                    schema=dict(child.get("schema") or {}),
+                )
+            )
+
+    def discovered_rows(self) -> list[dict[str, Any]]:
+        """Inventory projection for the request's trailing temporary injection."""
+        return self.discovered.rows()
+
+    def mark_restored_descents(self) -> None:
+        """Rebuild the descent-id set from restored history.
+
+        The stored transcript keeps descent turns (the user's trace must show how
+        a tool was found), but the model does not need them again: the tools they
+        revealed are already in the inventory. Re-deriving the ids here lets the
+        next request omit them, and it also lets :attr:`discovered` be repopulated
+        so the model still sees those tools after a restart.
+        """
+        descents = self.tools.tree.abstract_paths()
+        calls: dict[str, str] = {}
+        for message in self.messages:
+            if isinstance(message, AssistantMsg):
+                for call in message.tool_calls:
+                    if call.name in descents:
+                        calls[call.id] = call.name
+
+        for message in self.messages:
+            if not isinstance(message, ToolMsg):
+                continue
+            parent = calls.get(message.tool_call_id)
+            if parent is None:
+                continue
+            # Reuse the normal descent handler so the cache and the id set stay
+            # consistent with the live path.
+            self._on_descent(message.content)
+            self._descent_call_ids.add(message.tool_call_id)
+            self._expanded_paths.add(parent)
 
     def _on_batch_done(self, messages: list[Message]) -> None:
         """Announce the tool results of a completed batch to the trace panel.
@@ -969,6 +1132,10 @@ class SessionManager:
             # the whole history.
             runner.messages = [runner.system, *history]
             runner.persisted_count = len(runner.messages)
+            # Re-identify descent calls (their tool results echo the intermediate
+            # path), so the next model request can omit them even though the
+            # stored transcript keeps them for the user's trace.
+            runner.mark_restored_descents()
         # Restored history counts as already announced; the trace panel only shows
         # live events.
         runner._traced_count = len(runner.messages)
@@ -993,16 +1160,16 @@ class SessionManager:
         return True
 
     def load_capabilities(self, workdir: str) -> None:
-        """Override the tool tree from ``.agent/capabilities.json``; keep demo tools on failure.
+        """Override the tool tree from the capability manifest; keep demo tools on failure.
 
-        The manifest is an **operations surface**: a load failure must not prevent
-        startup, so the error is only recorded in ``capability_error`` and exposed
-        to the frontend by ``/api/health``.
+        The manifest lives in the system data directory (``harness.paths``), with a
+        project-local ``.agent/capabilities.json`` honoured when the repository
+        commits one. It is an **operations surface**: a load failure must not
+        prevent startup, so the error is only recorded in ``capability_error`` and
+        exposed to the frontend by ``/api/health``.
 
-        The working-memory file is created as a side effect: the system prompt tells
-        the model that ``.agent/WORK.md`` exists, so not creating it at startup
-        would be self-contradictory. Failure is likewise only recorded and does not
-        block startup.
+        The working-memory file is created as a side effect, outside the working
+        directory; failure is likewise only recorded and does not block startup.
         """
         try:
             path, created = ensure_working_memory(workdir)

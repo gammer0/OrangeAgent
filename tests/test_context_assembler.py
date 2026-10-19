@@ -48,7 +48,8 @@ class TestSystemPromptFiveSegments:
     def test_working_memory_body_not_included_A0b(self) -> None:
         content = _parts().render()
         # 只允许出现相对路径，不得出现正文
-        assert ".agent/WORK.md" in content
+        assert "WORK.md" in content
+        assert ".agent" not in content
         assert "工作记忆正文" not in content
 
     def test_long_term_memory_only_filename_A0c(self) -> None:

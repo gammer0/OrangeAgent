@@ -217,6 +217,9 @@ class LoopHooks:
         on_abort: Called when an abort happens (control signal); the argument is
             the reason.
         on_summary: Called when context compression fires.
+        on_descent: Called with a descent's raw output when its turn is dropped
+            from history, so the caller can move the children into the
+            discovered-tools inventory.
     """
 
     on_assistant: Callable[[AssistantMsg], None] | None = None
@@ -225,6 +228,7 @@ class LoopHooks:
     on_inject: Callable[[UserMsg, str], None] | None = None
     on_abort: Callable[[str], None] | None = None
     on_summary: Callable[[str], None] | None = None
+    on_descent: Callable[[str], None] | None = None
 
 
 @dataclass
@@ -306,6 +310,15 @@ class AgentLoop:
         self.tool_count_provider = tool_count_provider
         #: History token provider, for the routing enable conditions.
         self.history_tokens_provider = history_tokens_provider
+        #: Intermediate (abstract) paths the caller considers tree descents. A call
+        #: to one of these is a discovery step, not conversation, so its turn is
+        #: omitted from the projected request (see ``visible_history``).
+        self.descent_paths: frozenset[str] = frozenset()
+        #: Tool-call ids that belong to descent turns; populated as they happen.
+        self.descent_call_ids: set[str] = set()
+        #: Descents issued during **this run**. They stay visible to the model; only
+        #: older ones are dropped from the projected request.
+        self.current_turn_ids: set[str] = set()
         #: Most recent routing decision (so callers can write traces).
         self.last_route: RouteDecision | None = None
 
@@ -338,6 +351,10 @@ class AgentLoop:
             validate_messages(messages)
 
             outgoing = self._assemble(messages)
+            # Earlier turns' descents are omitted: their tools are already in the
+            # discovered-tools inventory. The current turn's descents stay, since
+            # the model needs those children to pick its next call.
+            outgoing = self.visible_history(outgoing)
             assistant = self.model.chat(outgoing)
             messages.append(assistant)
             if self.hooks.on_assistant is not None:
@@ -372,6 +389,15 @@ class AgentLoop:
             # cannot report them; this hook can.
             if self.hooks.on_batch_done is not None:
                 self.hooks.on_batch_done(messages)
+
+            # ---- Tree descent cleanup ----
+            # Descents are a means to an end: once a **concrete** tool has been
+            # called, the chain that led to it can be dropped from the model's
+            # context. Dropping it earlier would hide the children the model just
+            # asked for and make it repeat the same descent forever, so cleanup is
+            # gated on a real (non-descent) call existing in this batch.
+            self._mark_descent_turns(messages, plan)
+            self._prune_resolved_descents(messages, plan)
 
             if stop_after is not None:
                 # D7 / G1: fill placeholders after stopping the remaining groups,
@@ -424,7 +450,6 @@ class AgentLoop:
 
         if result.action == "session_end":
             self.controller.mark_stop("session_end")
-
         return result.messages
 
     # -------------------------------------------------------------- routing
@@ -456,6 +481,123 @@ class AgentLoop:
             history_tokens=history_tokens,
             tool_count=tool_count,
         )
+
+    # ------------------------------------------------------ descent cleanup
+
+    def _mark_descent_turns(self, messages: list[Message], plan: BatchPlan) -> None:
+        """Record descent turns and hand their children to the inventory.
+
+        A descent is a call to an abstract node. Its output lists that node's
+        children, which are exactly what the discovered-tools inventory carries,
+        so the turn is redundant **for the model** from the next step onward.
+
+        The turn is deliberately *not* removed from ``messages``. Removing it
+        would hide the result the model just asked for, and it would then repeat
+        the same descent forever (observed: eight identical ``/tool`` calls until
+        ``max_steps``). Instead the ids are recorded in :attr:`descent_call_ids`
+        and the projection layer omits those turns when building the outgoing
+        request -- so history stays valid and complete while the model still sees
+        a clean transcript.
+        """
+        if not plan.groups:
+            return
+
+        for group in plan.groups:
+            for call in group.calls:
+                if self._is_descent(call.name):
+                    self.descent_call_ids.add(call.id)
+                    self.current_turn_ids.add(call.id)
+
+        if not self.descent_call_ids:
+            return
+
+        # Feed the children into the inventory while the results are available.
+        if self.hooks.on_descent is not None:
+            for message in messages:
+                if (
+                    isinstance(message, ToolMsg)
+                    and message.tool_call_id in self.descent_call_ids
+                ):
+                    self.hooks.on_descent(message.content)
+
+    def _is_descent(self, path: str) -> bool:
+        """Whether ``path`` names an abstract node rather than a real tool.
+
+        The loop has no direct view of the tree, so the caller supplies the set
+        of intermediate paths through ``descent_paths``.
+        """
+        return path in self.descent_paths
+
+    def _prune_resolved_descents(
+        self, messages: list[Message], plan: BatchPlan
+    ) -> None:
+        """Drop descent turns once a concrete tool has been called.
+
+        This is the "clean up as soon as the choice is made" rule. The gate is
+        deliberate: pruning is only allowed when **this batch contains at least
+        one real tool call**. A batch made purely of descents is still mid-search,
+        and removing its results would leave the model without the children it
+        just asked for -- it would then descend the same path again, forever.
+
+        The tool these descents revealed is already in the discovered-tools
+        inventory, which is injected on every request, so the model keeps the
+        knowledge without the raw JSON staying in the transcript.
+        """
+        if not plan.groups:
+            return
+
+        real_calls = [
+            call
+            for group in plan.groups
+            for call in group.calls
+            if not self._is_descent(call.name)
+        ]
+        if not real_calls:
+            # Pure discovery batch: keep everything so the model can act next.
+            return
+
+        # Every descent resolved so far belongs to the chain that produced this
+        # call (or to earlier chains, which are equally obsolete). Drop them all.
+        self._prune_descents(messages, self.descent_call_ids)
+
+    def _prune_descents(self, messages: list[Message], doomed: set[str]) -> None:
+        """Remove the given descent calls and their results from ``messages``."""
+        if not doomed:
+            return
+
+        kept: list[Message] = []
+        for message in messages:
+            if isinstance(message, AssistantMsg):
+                remaining = [c for c in message.tool_calls if c.id not in doomed]
+                if message.tool_calls and not remaining:
+                    continue
+                if len(remaining) != len(message.tool_calls):
+                    message = AssistantMsg(content=message.content, tool_calls=remaining)
+            elif isinstance(message, ToolMsg) and message.tool_call_id in doomed:
+                continue
+            kept.append(message)
+        messages[:] = kept
+
+    def visible_history(self, messages: Sequence[Message]) -> list[Message]:
+        """Project history for a request, omitting unresolved descent turns.
+
+        Live turns are already pruned in place the moment a concrete tool is
+        chosen (see :meth:`_prune_resolved_descents`). This projection exists for
+        history that arrived from storage: a restored session still contains its
+        descent turns -- the user's trace must show how a tool was found -- while
+        the model does not need to re-read them, since the tools they revealed are
+        in the discovered-tools inventory.
+
+        Descents issued during **this** run are kept: the model is still using
+        those children to choose its next call.
+        """
+        drop = self.descent_call_ids - self.current_turn_ids
+        if not drop:
+            return list(messages)
+
+        kept = list(messages)
+        self._prune_descents(kept, drop)
+        return kept
 
     # ------------------------------------------------------ batch execution
 

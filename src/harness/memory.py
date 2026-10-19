@@ -5,9 +5,12 @@ See docs/02-data-structures/05-memory.md.
 Design notes:
 
 * Memory is stored as **files**, not in-memory objects.
-* Working memory ``<workdir>/.agent/WORK.md`` is free text; the system never
-  parses its structure (C1).
-* Long-term memory ``<global>/.agent/MEMORY.md`` is system-wide unique and
+* Both files live in the system data directory (``harness.paths``), never in
+  the user's project: writing ``.agent/WORK.md`` into the edited repository
+  pollutes it with files the user never asked for.
+* Working memory ``<home>/WORK.md`` is free text; the system never parses its
+  structure (C1).
+* Long-term memory ``<home>/MEMORY.md`` is system-wide unique and
   append-merge only (C7).
 * Every write goes through "temp file + ``os.replace``" for atomicity (C4).
 * This module only provides **pure functions/classes safe to call from a
@@ -28,7 +31,9 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from harness import paths
 from harness.exceptions import HarnessError
+from harness.paths import LEGACY_DIR_NAME
 
 __all__ = [
     "AGENT_DIR_NAME",
@@ -52,9 +57,9 @@ __all__ = [
 
 # ------------------------------------------------------------------------ paths
 
-#: Directory name: ``<workdir>/.agent/`` and ``<global>/.agent/``
-AGENT_DIR_NAME = ".agent"
-#: Working-memory file name (one per working directory, shared across sessions, C4)
+#: Legacy directory name (``.agent``): only a read-only source for manifests.
+AGENT_DIR_NAME = LEGACY_DIR_NAME
+#: Working-memory file name, directly in the working directory (C4)
 WORK_MEMORY_FILENAME = "WORK.md"
 #: Long-term memory file name (system-wide unique, C7)
 LONG_TERM_MEMORY_FILENAME = "MEMORY.md"
@@ -63,22 +68,28 @@ EXTRACT_PRINCIPLE_FILENAME = "extract.md"
 
 
 def work_memory_path(workdir: str | os.PathLike[str]) -> Path:
-    """Return the working-memory path ``<workdir>/.agent/WORK.md`` (C1/C4)."""
-    return Path(workdir) / AGENT_DIR_NAME / WORK_MEMORY_FILENAME
+    """Return the working-memory path ``<workdir>/WORK.md`` (C1/C4).
 
-
-def long_term_memory_path(global_dir: str | os.PathLike[str]) -> Path:
-    """Return the long-term memory path ``<global>/.agent/MEMORY.md`` (C7).
-
-    ``global_dir`` is the global directory; this path does not vary with the
-    working directory (C7).
+    Working memory is **project-scoped**: it describes this project and is shared
+    by every session opened on the same working directory. It sits directly in
+    the working directory (no ``.agent`` folder); global data lives in
+    ``~/.OAgent`` (``harness.paths``).
     """
-    return Path(global_dir) / AGENT_DIR_NAME / LONG_TERM_MEMORY_FILENAME
+    return paths.work_memory_path(workdir)
 
 
-def extract_principle_path(global_dir: str | os.PathLike[str]) -> Path:
-    """Return the extraction-principle path ``<global>/.agent/extract.md`` (C7)."""
-    return Path(global_dir) / AGENT_DIR_NAME / EXTRACT_PRINCIPLE_FILENAME
+def long_term_memory_path(global_dir: str | os.PathLike[str] | None = None) -> Path:
+    """Return the long-term memory path ``<home>/MEMORY.md`` (C7).
+
+    ``global_dir`` is accepted for backward compatibility and ignored; the file
+    is unique per installation, not per working directory (C7).
+    """
+    return paths.long_term_memory_path()
+
+
+def extract_principle_path(global_dir: str | os.PathLike[str] | None = None) -> Path:
+    """Return the extraction-principle path ``<home>/extract.md`` (C7)."""
+    return paths.extract_principle_path()
 
 
 # ------------------------------------------------------------- atomic write (C4)
@@ -152,7 +163,7 @@ def _read_text_with_retry(path: Path) -> str | None:
 
 
 def read_working_memory(workdir: str | os.PathLike[str]) -> str:
-    """Read the raw text of ``<workdir>/.agent/WORK.md``.
+    """Read the raw text of ``<home>/WORK.md``.
 
     A missing file returns the empty string: working memory has no structure, so
     absent means empty (C1). Nothing is parsed, trimmed or re-wrapped.
@@ -162,7 +173,7 @@ def read_working_memory(workdir: str | os.PathLike[str]) -> str:
 
 
 def write_working_memory_atomic(workdir: str | os.PathLike[str], text: str) -> Path:
-    """Atomically overwrite ``<workdir>/.agent/WORK.md`` with the exact text (C1/C4).
+    """Atomically overwrite ``<home>/WORK.md`` with the exact text (C1/C4).
 
     Returns:
         The path actually written.
@@ -181,7 +192,7 @@ def write_working_memory_atomic(workdir: str | os.PathLike[str], text: str) -> P
 #: Note: this text is model-visible, so it intentionally stays in Chinese.
 WORK_MEMORY_TEMPLATE = """# 工作记忆
 
-> 本文件由 Harness 自动创建，同工作目录的多个会话共享。
+> 本文件由 Harness 自动创建，位于工作目录根部，同工作目录的多个会话共享。
 > 用 /tool/memory/work/{read,append,replace} 读写；系统不解析其结构。
 
 ## 当前状态
@@ -203,19 +214,17 @@ def ensure_working_memory(
     *,
     template: str | None = None,
 ) -> tuple[Path, bool]:
-    """Ensure the working-memory file exists, creating it from the template if absent.
+    """Ensure ``<workdir>/WORK.md`` exists, creating it from the template if absent.
 
-    The system prompt tells the model "this project has ``.agent/WORK.md``" but
-    nothing ever created it -- the model's first read returned "file not found",
-    contradicting the prompt. This function supplies that precondition during
-    service assembly.
+    Working memory is project-scoped, so it is created **directly** in the
+    working directory. No ``.agent`` folder is created.
 
     **Creates only when missing**: never overwrites existing content. Working
     memory is shared across sessions, so overwriting would erase conclusions
     another session just wrote.
 
     Args:
-        workdir: Working directory.
+        workdir: Working directory; the file lives at ``<workdir>/WORK.md``.
         template: Initial content; defaults to :data:`WORK_MEMORY_TEMPLATE`.
 
     Returns:

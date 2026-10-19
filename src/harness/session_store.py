@@ -2,7 +2,8 @@
 
 See docs/02-data-structures/02-session-layer.md §2.3.
 
-* Database location: ``<workdir>/.agent/harness.db``
+* Database location: ``<home>/harness.db`` (system data directory, see
+  ``harness.paths``) -- never inside the working directory the user is editing.
 * ``WAL`` mode, one connection per thread (``threading.local``)
 * ``SystemMsg`` is **never persisted** (H6)
 * The transaction unit is a **single ``ExecGroup``**: one group commits in one
@@ -20,6 +21,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
+from harness import paths
 from harness.exceptions import MessageInvariantError
 from harness.message import (
     AssistantMsg,
@@ -40,8 +42,10 @@ __all__ = [
     "SessionStore",
 ]
 
-#: Location of the database relative to the working directory
-DB_RELATIVE_PATH = Path(".agent") / "harness.db"
+#: Location of the database relative to the installation data directory.
+#: Kept as a ``Path`` for backward compatibility; the file is no longer placed
+#: under the working directory.
+DB_RELATIVE_PATH = Path("harness.db")
 
 #: Schema SQL, verbatim from design doc §2.3
 SCHEMA_SQL = """
@@ -66,6 +70,8 @@ CREATE TABLE IF NOT EXISTS messages (
     PRIMARY KEY (session_id, seq),
     FOREIGN KEY (session_id) REFERENCES sessions(session_id)
 );
+
+CREATE INDEX IF NOT EXISTS idx_sessions_working_dir ON sessions(working_dir);
 """
 
 MessageType = Literal["user", "assistant", "tool"]
@@ -118,15 +124,25 @@ class SessionStore:
     ``threading.local`` for thread isolation instead.
     """
 
-    def __init__(self, workdir: str | Path) -> None:
-        """Open (creating if needed) the database in the working directory.
+    def __init__(
+        self,
+        workdir: str | Path | None = None,
+        *,
+        db_path: str | Path | None = None,
+    ) -> None:
+        """Open (creating if needed) the shared session database.
 
         Args:
-            workdir: Working directory; the database lives at
-                ``<workdir>/.agent/harness.db``.
+            workdir: Accepted for backward compatibility and **ignored**: the
+                database is not stored in the working directory.
+            db_path: Explicit database location; defaults to ``<home>/harness.db``.
         """
-        self.workdir = Path(workdir)
-        self.db_path = self.workdir / DB_RELATIVE_PATH
+        self.workdir = Path(workdir) if workdir is not None else None
+        self.db_path = (
+            Path(db_path).expanduser()
+            if db_path is not None
+            else paths.harness_home() / DB_RELATIVE_PATH
+        )
         self._local = threading.local()
         # Serializes first-time database creation (WAL + schema): protects
         # initialization only, not day-to-day reads and writes.

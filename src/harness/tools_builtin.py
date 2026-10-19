@@ -32,7 +32,6 @@ from typing import Any
 
 from harness.permission import CapName, Permission
 from harness.tool_tree import ToolDef
-from harness.tools_fluid import fluid_check, fluid_probe
 
 __all__ = [
     "TOOL_SPECS",
@@ -609,19 +608,6 @@ TOOL_SPECS: dict[str, dict[str, Any]] = {
         _spec("/tool/code/py/run_brief", py_run_brief, "短时运行脚本并返回输出（带超时）",
               {"path": _STR, "timeout": {"type": "integer", "default": DEFAULT_TIMEOUT_S}},
               ["path"], ["exec"]),
-        _spec("/tool/game/snake/check", snake_check, "贪吃蛇验收：结构/语法/常见缺陷",
-              {"path": {"type": "string", "default": "snake_game"}}, [], ["read"], True),
-        _spec("/tool/game/snake/demo", snake_demo, "贪吃蛇无头自检：固定种子跑若干步",
-              {"path": {"type": "string", "default": "snake_game"},
-               "steps": {"type": "integer", "default": 200},
-               "seed": {"type": "integer", "default": 7}},
-              [], ["exec"]),
-        _spec("/tool/fluid/check", fluid_check, "流体仿真结构验收：文件/API/不依赖 pygame",
-              {"path": {"type": "string", "default": "fluid"}}, [], ["read"], True),
-        _spec("/tool/fluid/probe", fluid_probe, "流体物理验收：跑 N 步查守恒/边界/静置",
-              {"path": {"type": "string", "default": "fluid"},
-               "steps": {"type": "integer", "default": 500}},
-              [], ["exec"]),
         _spec("/mcp/fs/list", mcp_fs_list, "MCP filesystem：列出目录（URI 语义）",
               {"path": {"type": "string", "default": "."}}, [], ["read"], True),
         _spec("/mcp/fs/read", mcp_fs_read, "MCP filesystem：读取文本文件",

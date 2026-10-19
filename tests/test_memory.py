@@ -23,14 +23,19 @@ from harness.memory import (
     work_memory_path,
     write_working_memory_atomic,
 )
+from harness.paths import harness_home
 
 # ------------------------------------------------------------------ 工作记忆
 
 
 class TestWorkingMemory:
-    def test_c1_work_memory_path_is_fixed(self, tmp_path: Path) -> None:
-        assert work_memory_path(tmp_path) == tmp_path / ".agent" / "WORK.md"
+    def test_c1_work_memory_path_is_project_level(self, tmp_path: Path) -> None:
+        """工作记忆是项目级的，直接位于工作目录根部。"""
+        assert work_memory_path(tmp_path) == tmp_path / "WORK.md"
         assert WORK_MEMORY_FILENAME == "WORK.md"
+        # 不在子目录里，也与全局数据目录无关
+        assert work_memory_path(tmp_path).parent == tmp_path
+        assert work_memory_path(tmp_path).parent != harness_home()
 
     def test_c1_freeform_text_roundtrip_verbatim(self, tmp_path: Path) -> None:
         text = "# 标题\n\n- 条目一\n  - 缩进\n\n任意格式 **不解析**\n"
@@ -41,10 +46,12 @@ class TestWorkingMemory:
         assert not work_memory_path(tmp_path).exists()
         assert read_working_memory(tmp_path) == ""
 
-    def test_c4_write_creates_agent_dir(self, tmp_path: Path) -> None:
+    def test_c4_write_creates_only_the_file(self, tmp_path: Path) -> None:
         path = write_working_memory_atomic(tmp_path, "x")
-        assert path == tmp_path / ".agent" / "WORK.md"
+        assert path == tmp_path / "WORK.md"
         assert path.exists()
+        # 不得创建 .agent 子目录
+        assert not (tmp_path / ".agent").exists()
 
     def test_c4_atomic_write_keeps_original_on_failure(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -62,7 +69,7 @@ class TestWorkingMemory:
 
         assert read_working_memory(tmp_path) == original
         # 临时文件被清理，目录内只剩 WORK.md
-        leftovers = [p.name for p in (tmp_path / ".agent").iterdir() if p.name != "WORK.md"]
+        leftovers = [p.name for p in tmp_path.iterdir() if p.name != "WORK.md"]
         assert leftovers == []
 
     def test_c4_no_partial_file_visible_during_write(self, tmp_path: Path) -> None:
@@ -95,9 +102,11 @@ class TestProjectMemory:
     def test_c7_paths_are_global_constants(self, tmp_path: Path) -> None:
         a = long_term_memory_path(tmp_path)
         b = long_term_memory_path(tmp_path)
-        assert a == b == tmp_path / ".agent" / "MEMORY.md"
+        assert a == b == harness_home() / "MEMORY.md"
         assert LONG_TERM_MEMORY_FILENAME == "MEMORY.md"
-        assert extract_principle_path(tmp_path) == tmp_path / ".agent" / "extract.md"
+        assert extract_principle_path(tmp_path) == harness_home() / "extract.md"
+        # 不随工作目录变化（C7）
+        assert long_term_memory_path(Path("/elsewhere")) == a
 
     def test_append_only_merge(self) -> None:
         mem = ProjectMemory()

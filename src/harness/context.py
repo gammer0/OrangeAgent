@@ -62,8 +62,35 @@ DEFAULT_SYSTEM_REQUIREMENTS = """你是运行在 Harness 平台上的智能体�
 - 所有工具调用都必须给出完整绝对路径（以 / 开头），不得使用缩写或相对路径。
 - 不再需要工具时，直接给出最终答案文本，不要输出空的 tool_calls。
 
+## 工具发现协议（本平台的核心机制）
+
+工具不是一次性全部给你的。系统用一棵**工具树**组织全部能力，你需要沿树下钻来定位工具。
+
+### 树的结构
+- 树的根是三个资源类别：`/tool`（本地能力）、`/mcp`（MCP 服务）、`/skill`（技能包）。
+- 中间层是分类节点（如 `/tool/os`、`/tool/os/file`），它们**本身不是能力**，只是位置。
+- 叶子才是真正可调用的工具（如 `/tool/os/file/read`）。
+
+### 下钻规则
+1. 下方工具索引只列出顶层资源根，**不是完整清单**。
+2. 调用任意中间路径即可展开它，返回其**直接子节点**及其参数 schema。
+3. 下钻只读且幂等，但**同一个路径不必重复展开**——重复调用纯属浪费轮次。
+4. 得到的叶子路径携带完整参数说明，直接调用即可，不需要为了看参数再下钻一次。
+
+### 已发现工具缓存（重要）
+- 你下钻展开过的**具体工具**会被记入已发现工具缓存，每次请求都会在末尾重新注入。
+- 缓存条目包含：路径、描述、**完整参数 schema**。凡是在缓存里的工具都可以直接调用。
+- 缓存只存具体工具（叶子），不存中间分类节点——节点类型天然区分了两者。
+- 缓存是临时的：它不进对话记录，也不占你的历史；它总是最新的一份。
+- 如果需要的工具不在缓存里，说明还没展开到，请沿树继续下钻。
+
+### 使用建议
+- 先判断目标属于哪一类能力，选对分支再下钻，不要盲目逐个试。
+- 一次可以同时展开多个互不相关的分支（多个 tool_calls）。
+- 下钻结束后立刻调用叶子工具，不要反复确认同一层。
+
 ## 工作记忆
-- 本项目存在一个共享工作记忆文件 .agent/WORK.md，同工作目录的多个会话共享它。
+- 本项目存在一个共享工作记忆文件 WORK.md（位于工作目录根部），同工作目录的多个会话共享它。
 - 它不是系统提示的一部分：需要回顾时用 /tool/memory/work/read 读取，
   需要沉淀时用 /tool/memory/work/append 追加，需要整理时用 /tool/memory/work/replace 重写。
 - 优先用上述专用工具；它们只能操作 WORK.md，不能读写其他文件。
@@ -95,7 +122,8 @@ class SystemPromptParts:
             empty.
         memory_name: Section 3, the long-term memory file name.
         working_dir: Section 5, the absolute path of the working directory.
-        work_memory_relative_path: Section 5, the working-memory relative path.
+        work_memory_relative_path: Section 5, the working-memory path relative to
+            the working directory (``WORK.md`` by default).
         goal: Section 5, an optional goal.
         system_requirements: Section 1, defaults to the module constant.
         role_guide: Section 4, defaults to the module constant.
@@ -104,7 +132,7 @@ class SystemPromptParts:
     tool_index: str = ""
     memory_name: str = LONG_TERM_MEMORY_NAME
     working_dir: str = ""
-    work_memory_relative_path: str = ".agent/WORK.md"
+    work_memory_relative_path: str = "WORK.md"
     goal: str | None = None
     system_requirements: str = DEFAULT_SYSTEM_REQUIREMENTS
     role_guide: str = DEFAULT_ROLE_GUIDE

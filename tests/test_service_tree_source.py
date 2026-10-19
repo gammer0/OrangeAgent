@@ -9,15 +9,45 @@ from __future__ import annotations
 
 import json
 
-from harness.capabilities import SkillDef, build_builtin_tool, save_manifest
-from harness.capabilities import CapabilityManifest
+from harness.capabilities import SkillDef, SourceSpec, save_manifest
+from harness.capabilities import CapabilityManifest, _build_external_tool
 from harness.service import build_service
+
+_EXT_SOURCE = """\
+def read(path: str = ".") -> str:
+    return f"read {path}"
+
+
+def echo(text: str = "") -> str:
+    return text
+"""
 
 
 def _write_manifest(workdir) -> None:
+    """按清单装载两个外来工具 + 一个 skill。
+
+    使用外来 Python 工具而不是内置工具：本部署不随包发布内置工具，但「工具树
+    必须来自清单」这一回归点与工具从哪来无关。
+    """
+    root = workdir / "ext"
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "tool.py").write_text(_EXT_SOURCE, encoding="utf-8")
+
     manifest = CapabilityManifest()
-    manifest.add_tool(build_builtin_tool("/tool/os/file/read", str(workdir)))
-    manifest.add_tool(build_builtin_tool("/tool/os/echo", str(workdir)))
+    for path, callable_name in (
+        ("/tool/os/file/read", "read"),
+        ("/tool/os/echo", "echo"),
+    ):
+        source = SourceSpec(kind="python", target="./ext/tool.py", callable=callable_name)
+        entry = {
+            "path": path,
+            "description": f"testing {path}",
+            "caps": ["read"],
+            "schema": {"type": "object", "properties": {"path": {"type": "string"}}},
+            "source": {"kind": "python", "target": "./ext/tool.py", "callable": callable_name},
+        }
+        manifest.add_tool(_build_external_tool(path, entry, source, str(workdir)))
+        manifest.sources[path] = source
     manifest.add_skill(SkillDef(name="demo", description="演示技能"))
     save_manifest(manifest, workdir)
 

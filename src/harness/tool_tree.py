@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import dataclasses
 import hashlib
+import json
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
@@ -247,6 +248,24 @@ class ToolDef:
     def with_retired(self, retired: bool = True) -> ToolDef:
         """Return a copy with the ``retired`` flag changed (B23: unload marks, never deletes)."""
         return dataclasses.replace(self, retired=retired)
+
+    def with_query(self, tree: ToolTree) -> ToolDef:
+        """Return a copy whose ``fn`` descends into ``tree`` from this path.
+
+        Abstract nodes carry ``fn=None`` because the tree is not known when the
+        entry is synthesized. Binding happens at resolve time, so calling an
+        intermediate path (``/tool/os``) returns its children; the model then
+        learns exact leaf paths one level at a time instead of receiving a flat
+        dump up front.
+        """
+
+        def descend(**_kwargs: Any) -> str:
+            result = tree_query(self.path, tree=tree)
+            return json.dumps(result, ensure_ascii=False, indent=2)
+
+        # ``**_kwargs`` swallows whatever the model sends; a descent takes no
+        # arguments because the path already identifies the node.
+        return dataclasses.replace(self, fn=descend)
 
     # ------------------------------------------------------- factory methods
 
@@ -619,10 +638,26 @@ class ToolTree:
         """Every visible node path (lexicographic)."""
         return [n.path for n in self.visible_nodes()]
 
+    def abstract_paths(self) -> frozenset[str]:
+        """Paths of the visible intermediate nodes (the descent surface).
+
+        A call to one of these does not run a tool; it lists children. The loop
+        uses this set to decide which history turns are discovery noise and can
+        be dropped once their children have been recorded.
+        """
+        return frozenset(
+            node.path for node in self.visible_nodes() if node.kind == "abstract"
+        )
+
     # -------------------------------------------------- execution resolution
 
     def resolve(self, path: str) -> ToolDef:
         """``path -> ToolNode -> tool_id -> ToolDef`` (the §4.5 call chain).
+
+        Abstract nodes resolve to a synthetic entry whose ``fn`` is bound to
+        :func:`tree_query`, so calling an intermediate path descends one level
+        instead of failing. That is what lets the index stay shallow (L1 only)
+        while the model still reaches leaves by walking down.
 
         Raises:
             PermissionDenied: The path is denied (B5; returns ``3a``).
@@ -638,7 +673,31 @@ class ToolTree:
         entry = self.flat_store.get(node.tool_id) or self.synthetic_entries.get(node.path)
         if entry is None:
             raise KeyError(f"tool_id={node.tool_id!r} is not in FlatStore (B2)")
+        if node.kind == "abstract":
+            return entry.with_query(self)
         return entry
+
+    # ------------------------------------------------------- descent surface
+
+    def index_specs(self, depth: int = 1) -> list[ToolDef]:
+        """Entries to advertise in the model's ``tools`` parameter.
+
+        Only nodes at or above ``depth`` are advertised. With the default of 1
+        that means the resource roots (``/tool``, ``/mcp``, ``/skill``) and
+        nothing deeper: the model must call a root to discover its children, so
+        every path it obtains comes from the tree rather than from a flat dump.
+        """
+        out: list[ToolDef] = []
+        for node in self.visible_nodes():
+            if node.path == "/":
+                continue
+            if depth and node.depth > depth:
+                continue
+            entry = self.flat_store.get(node.tool_id) or self.synthetic_entries.get(node.path)
+            if entry is None:
+                continue
+            out.append(entry.with_query(self) if node.kind == "abstract" else entry)
+        return out
 
     # ----------------------------------------------------- mutation (B25)
 

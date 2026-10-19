@@ -23,11 +23,13 @@ Design constraints:
 
 from __future__ import annotations
 
+import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from harness import paths
 from harness.capabilities import (
     CapabilityError,
     CapabilityManifest,
@@ -137,7 +139,9 @@ class HarnessService:
     ``degraded``, so the CLI can report layer by layer.
 
     Attributes:
-        workdir: Working directory (``.env`` and ``.agent/`` are relative to it).
+        workdir: Working directory the tools are confined to (``.env`` and
+            ``.agent/WORK.md`` live there); other Harness data lives in
+            ``~/.OAgent``.
         config: LLM configuration; ``None`` when loading failed.
         flat_store / tree: Tool capability layer.
         registry: Session registry.
@@ -157,8 +161,8 @@ class HarnessService:
         """Assemble the service.
 
         Args:
-            workdir: Working directory; both ``.env`` and ``.agent/`` are resolved
-                relative to it.
+            workdir: Working directory. ``.env`` and ``.agent/WORK.md`` are
+                resolved relative to it; global data goes to ``~/.OAgent``.
             capacity: Context capacity (tokens).
             load_model: Whether to load the model channel. When ``False`` only
                 local state is checked: no API key validation and no HTTP client.
@@ -174,7 +178,7 @@ class HarnessService:
         self.config: LLMConfig | None = None
         self.flat_store: FlatStore | None = None
         self.tree: ToolTree | None = None
-        #: Capability manifest loaded from ``.agent/capabilities.json``; None if not loaded.
+        #: Capability manifest loaded from the data directory; None if not loaded.
         self.capabilities: CapabilityManifest | None = None
         self.permissions: AgentPermissions = AgentPermissions(agent_id=LOCAL_AGENT)
         self.registry: SessionRegistry | None = None
@@ -201,9 +205,9 @@ class HarnessService:
     def _ensure_work_memory(self) -> None:
         """Ensure ``<workdir>/.agent/WORK.md`` exists (created from the template if missing).
 
-        The system prompt tells the model "this project has ``.agent/WORK.md``",
-        but nothing ever created it -- the model's first read returned "file not
-        found", contradicting the prompt.
+        Working memory is project-scoped, so it is created inside the working
+        directory; global data stays in ``~/.OAgent``. The system prompt tells the
+        model this file exists, so creating it at startup keeps the prompt truthful.
 
         **Failure never blocks startup**: working memory is an aid, and the agent
         still works without it, so failures are only recorded in ``problems``.
@@ -218,15 +222,15 @@ class HarnessService:
     def _load_capability(self) -> None:
         """Assemble the tool capability layer (flat store + derived tree).
 
-        Note: ``.agent/capabilities.json`` must be read here, otherwise the CLI
+        Note: the capability manifest must be read here, otherwise the CLI
         sees an empty tree while the web service loads the real tools from the
         manifest -- the two sides would observe different capability surfaces.
         A missing or invalid manifest falls back to an empty tree (conservative
         degradation, consistent with I4).
 
-        Permissions are read from ``.agent/permissions.json`` (agent_id=``local``)
-        so the CLI and the runtime see the same blocking results; a missing file
-        yields an empty table (everything allowed).
+        Permissions are read for agent_id=``local`` so the CLI and the runtime see
+        the same blocking results; a missing file yields an empty table
+        (everything allowed).
         """
         try:
             self.flat_store = FlatStore()
@@ -425,7 +429,7 @@ class HarnessService:
 
     def new_trace_logger(self, session_id: str) -> TraceLogger:
         """Create a trace writer for the session (one JSONL per session, E3)."""
-        return TraceLogger(self.workdir / ".agent" / "traces", session_id)
+        return TraceLogger(paths.traces_dir(), session_id)
 
     def sweep(self) -> list[str]:
         """Evict unloadable idle sessions; returns the ids that were unloaded."""
@@ -462,6 +466,7 @@ def build_service(
     *,
     capacity: int | None = None,
     load_model: bool = True,
+    data_dir: str | Path | None = None,
 ) -> HarnessService:
     """Convenience constructor.
 
@@ -469,7 +474,11 @@ def build_service(
         workdir: Working directory.
         capacity: Context capacity; defaults when omitted.
         load_model: Whether to load the model channel.
+        data_dir: Override the data directory (defaults to the system location
+            from ``harness.paths``); tests pass ``tmp_path`` here.
     """
+    if data_dir is not None:
+        os.environ[paths.ENV_HARNESS_HOME] = str(Path(data_dir).resolve())
     return HarnessService(
         workdir,
         capacity=capacity or DEFAULT_CONTEXT.capacity,

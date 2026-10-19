@@ -40,6 +40,7 @@ from harness.capabilities import (
     group_of,
     load_manifest,
     save_manifest,
+    skills_dir,
     write_skill_files,
 )
 from harness.config import ConfigError, load_llm_config
@@ -983,7 +984,7 @@ def _cmd_skills_list(args: argparse.Namespace) -> int:
     manifest = _load_or_empty(args.workdir)
     rows = []
     for skill in sorted(manifest.skills, key=lambda s: s.name):
-        target = Path(args.workdir).resolve() / skill.skill_md
+        target = skills_dir(args.workdir) / Path(skill.dir).name / "SKILL.md"
         rows.append(
             {
                 "name": skill.name,
@@ -1074,7 +1075,7 @@ def _cmd_skills_show(args: argparse.Namespace) -> int:
     if skill is None:
         print(f"没有该 skill: {args.name}", file=sys.stderr)
         return 1
-    target = Path(args.workdir).resolve() / skill.dir / args.file
+    target = skills_dir(args.workdir) / Path(skill.dir).name / args.file
     if not target.is_file():
         print(f"文件不存在: {target}", file=sys.stderr)
         return 1
@@ -1165,7 +1166,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--workdir",
         default=".",
-        help="工作目录（.env 与 .agent/ 相对它解析），默认当前目录",
+        help=(
+            "工作目录（.env 相对它解析；数据目录由 HARNESS_HOME 或系统目录决定），"
+            "默认当前目录"
+        ),
     )
     parser.add_argument("--json", action="store_true", help="输出 JSON")
     sub = parser.add_subparsers(dest="command", required=True)

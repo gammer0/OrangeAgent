@@ -789,7 +789,8 @@ class TestDiscoveredToolsEviction:
         bucket = DiscoveredTools()
         bucket.upsert(self._disc("/tool/a", 3))
         rows = bucket.rows()
-        assert rows == [{"path": "/tool/a", "description": "/tool-a"}]
+        # 投影带上 schema：模型拿到路径即可直接调用，不必再下钻看参数
+        assert rows == [{"path": "/tool/a", "description": "/tool-a", "schema": {}}]
 
     def test_remove_prefix_4_7(self) -> None:
         bucket = DiscoveredTools()

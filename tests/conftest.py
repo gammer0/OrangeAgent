@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -34,3 +35,15 @@ def tmp_path(_tmp_root: Path, request: pytest.FixtureRequest) -> Path:
             child.unlink(missing_ok=True)
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+@pytest.fixture(autouse=True)
+def _isolated_harness_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """把数据目录隔离到用例临时目录。
+
+    生产环境的数据目录在用户系统目录（``%APPDATA%\\Harness``），测试绝不能
+    写进去：否则用例之间互相污染，且会在开发者机器上留下垃圾。
+    """
+    home = tmp_path / "harness_home"
+    monkeypatch.setenv("HARNESS_HOME", str(home))
+    return home

@@ -20,6 +20,7 @@ from harness.message import (
     validate_messages,
 )
 from harness.session import SessionRecord, Watermark
+from harness.paths import harness_home
 from harness.session_store import DB_RELATIVE_PATH, SessionStore
 
 
@@ -40,19 +41,28 @@ def _call(call_id: str = "c1", name: str = "/tool/os/file/read") -> ToolCall:
 
 @pytest.fixture
 def store(tmp_path):
-    s = SessionStore(tmp_path)
+    s = SessionStore(db_path=tmp_path / "harness.db")
     s.upsert_session(_record(workdir=str(tmp_path)))
     yield s
     s.close()
 
 
 class TestDatabaseSetup:
-    def test_db_lives_under_workdir_dot_agent(self, tmp_path) -> None:
+    def test_db_defaults_outside_working_dir(self, tmp_path) -> None:
+        """数据库不得写进工作目录：默认落在系统数据目录。"""
         store = SessionStore(tmp_path)
         store.upsert_session(_record())
-        expected = tmp_path / DB_RELATIVE_PATH
-        assert store.db_path == expected
-        assert expected.exists()
+        assert store.db_path == harness_home() / DB_RELATIVE_PATH
+        assert store.db_path.is_file()
+        assert not (tmp_path / ".agent").exists()
+        store.close()
+
+    def test_explicit_db_path_is_honoured(self, tmp_path) -> None:
+        target = tmp_path / "custom" / "sessions.db"
+        store = SessionStore(db_path=target)
+        store.upsert_session(_record())
+        assert store.db_path == target
+        assert target.is_file()
         store.close()
 
     def test_wal_mode_enabled(self, store) -> None:

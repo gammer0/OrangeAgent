@@ -45,13 +45,23 @@ DEFAULT_MAX_DISCOVERED = 50
 class ToolDiscovery:
     """One record in the inventory (design doc §4.2).
 
+    Only concrete tools are stored: ``kind`` is always ``leaf``. Abstract nodes
+    are locations in the tree, not capabilities, so they never enter the cache --
+    the model learns them from the descent result and does not need them replayed
+    back on every request.
+
     Attributes:
         path: Full absolute path.
         description: One-line description, <= 80 characters.
-        kind: ``abstract`` / ``leaf``.
+        kind: Always ``leaf`` for cached entries; kept so the record can also
+            describe a node shape when inspected directly.
         first_seen_step: Step at which ``tree_query`` first returned it.
         last_used_step: Step at which it was last returned or called
             (the eviction basis, §4.7).
+        schema: JSON-schema of the tool's parameters, captured when the descent
+            revealed it. Without this the model would know a path exists but
+            still have to descend again just to learn its arguments -- which
+            defeats the point of caching the discovery.
     """
 
     path: str
@@ -59,6 +69,7 @@ class ToolDiscovery:
     kind: Literal["abstract", "leaf"]
     first_seen_step: int
     last_used_step: int
+    schema: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not self.path.startswith("/"):
@@ -72,9 +83,17 @@ class ToolDiscovery:
         """Update ``last_used_step`` (§4.7 "use")."""
         self.last_used_step = step
 
-    def to_row(self) -> dict[str, str]:
-        """Project into an element of the temporary system message (message §3.7)."""
-        return {"path": self.path, "description": self.description}
+    def to_row(self) -> dict[str, Any]:
+        """Project into an element of the temporary system message (message §3.7).
+
+        The schema travels with the record so a discovered tool is immediately
+        callable: path, description and arguments all arrive together.
+        """
+        return {
+            "path": self.path,
+            "description": self.description,
+            "schema": self.schema,
+        }
 
 
 @dataclass
@@ -110,9 +129,13 @@ class DiscoveredTools:
         """
         existing = self.entries.get(discovery.path)
         if existing is not None:
-            existing.description = discovery.description
+            existing.description = discovery.description or existing.description
             existing.kind = discovery.kind
             existing.last_used_step = max(existing.last_used_step, discovery.last_used_step)
+            # Keep the schema that carries the arguments: an update that omits it
+            # must not erase what an earlier descent already learned.
+            if discovery.schema:
+                existing.schema = discovery.schema
             return
         self.entries[discovery.path] = discovery
         self._evict()
@@ -142,6 +165,10 @@ class DiscoveredTools:
         entry.touch(step)
         return True
 
+    def paths(self) -> list[str]:
+        """Every cached path (concrete tools only)."""
+        return list(self.entries)
+
     def remove_prefix(self, path_prefix: str) -> list[str]:
         """Remove every record under a prefix on unload (B24)."""
         removed = [
@@ -156,7 +183,7 @@ class DiscoveredTools:
         """Clear the inventory (during context compression, in sync with ``delivered``)."""
         self.entries.clear()
 
-    def rows(self) -> list[dict[str, str]]:
+    def rows(self) -> list[dict[str, Any]]:
         """Project into temporary system-message entries, descending by ``last_used_step``."""
         ordered = sorted(
             self.entries.values(),
@@ -305,6 +332,9 @@ class TreeSessionState:
                         kind=child.kind,
                         first_seen_step=step,
                         last_used_step=step,
+                        # Carry the schema so the cached entry stays callable
+                        # without another descent.
+                        schema=dict(child.schema or {}),
                     )
                 )
                 payload.append(item)

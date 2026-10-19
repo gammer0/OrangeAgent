@@ -22,6 +22,7 @@ wheels/
 
 # Tooling caches
 .pytest_cache/
+.pytest_tmp/
 .ruff_cache/
 .mypy_cache/
 .coverage
@@ -38,6 +39,11 @@ coverage.xml
 
 # Runtime output
 output/
+
+# Session database (recreated on start; never commit conversation data)
+.agent/harness.db
+.agent/harness.db-shm
+.agent/harness.db-wal
 outputs/
 logs/
 *.log

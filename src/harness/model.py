@@ -151,7 +151,7 @@ class Adapter(Protocol):
         model: str,
         temperature: float,
         max_tokens: int,
-        discovered: list[dict[str, str]] | None = None,
+        discovered: list[dict[str, Any]] | None = None,
         tools: Sequence[ToolSpec] | None = None,
     ) -> dict[str, Any]:
         """Project messages into a vendor request body."""
@@ -179,7 +179,7 @@ class OpenAIAdapter:
         model: str,
         temperature: float,
         max_tokens: int,
-        discovered: list[dict[str, str]] | None = None,
+        discovered: list[dict[str, Any]] | None = None,
         tools: Sequence[ToolSpec] | None = None,
     ) -> dict[str, Any]:
         """Project messages and assemble a Chat Completions request body.
@@ -266,7 +266,7 @@ class AnthropicAdapter:
         model: str,
         temperature: float,
         max_tokens: int,
-        discovered: list[dict[str, str]] | None = None,
+        discovered: list[dict[str, Any]] | None = None,
         tools: Sequence[ToolSpec] | None = None,
     ) -> dict[str, Any]:
         """Split the system prompt and conversation turns per the Messages protocol."""
@@ -312,11 +312,7 @@ class AnthropicAdapter:
             turns.append({"role": "user", "content": [{"type": "text", "text": msg.content}]})
 
         if discovered:
-            listing = "\n".join(
-                f"{item['path']} — {item['description']}" for item in discovered
-            )
-            # Note: this text is model-visible, so it intentionally stays in Chinese.
-            system_parts.append(f"已发现工具：\n{listing}")
+            system_parts.append(render_discovered(discovered))
 
         body: dict[str, Any] = {
             "model": model,
@@ -372,6 +368,50 @@ class AnthropicAdapter:
             tokens_out=int(usage.get("output_tokens", 0) or 0),
             model=str(payload.get("model", "")),
         )
+
+
+def render_discovered(items: Sequence[dict[str, Any]]) -> str:
+    """Render the discovered-tools inventory as a trailing temporary section.
+
+    Each entry carries its **full parameter schema**, so a tool that has been
+    discovered is immediately callable: the model never needs to descend a second
+    time just to learn the arguments.
+
+    Only concrete tools appear here -- the cache never holds abstract nodes,
+    because they are locations rather than capabilities.
+
+    Note: this text is model-visible, so it intentionally stays in Chinese.
+    """
+    import json
+
+    lines = ["已发现工具（可直接调用，无需再次下钻）："]
+    for item in items:
+        path = item.get("path", "")
+        description = (item.get("description") or "").strip()
+        schema = item.get("schema") or {}
+        props = schema.get("properties") or {}
+        required = set(schema.get("required") or [])
+
+        head = f"- {path}"
+        if description:
+            head += f" — {description}"
+        lines.append(head)
+        if props:
+            params = []
+            for name, spec in props.items():
+                kind = (spec or {}).get("type", "any")
+                mark = "必填" if name in required else "可选"
+                default = (spec or {}).get("default", None)
+                if default is not None:
+                    shown = json.dumps(default, ensure_ascii=False)
+                    extra = f"，默认 {shown}"
+                else:
+                    extra = ""
+                params.append(f"{name}:{kind}（{mark}{extra}）")
+            lines.append(f"    参数：{', '.join(params)}")
+        else:
+            lines.append("    参数：无")
+    return "\n".join(lines)
 
 
 def _safe_json(raw: str) -> Any:
@@ -509,7 +549,7 @@ class ReverseProxy:
         messages: Sequence[Message],
         *,
         session_id: str,
-        discovered: list[dict[str, str]] | None = None,
+        discovered: list[dict[str, Any]] | None = None,
         model: str | None = None,
         tools: Sequence[ToolSpec] | None = None,
     ) -> LLMResponse:
@@ -578,7 +618,7 @@ class ReverseProxy:
         messages: Sequence[Message],
         *,
         session_id: str,
-        discovered: list[dict[str, str]] | None,
+        discovered: list[dict[str, Any]] | None,
         model: str,
         tools: Sequence[ToolSpec] | None = None,
     ) -> LLMResponse:

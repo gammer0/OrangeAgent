@@ -307,9 +307,19 @@ class TestProjection:
         state = TreeSessionState()
         tree_query("/skill/mmd", tree=tree, state=state, step=1)
         rows = state.discovered_rows()
+        # 投影除路径与描述外还带 schema（此处夹具的 skill 节点无参数），
+        # 使已发现的工具可以直接调用，无需再次下钻
         assert sorted(rows, key=lambda r: r["path"]) == [
-            {"path": "/skill/mmd/pose", "description": "姿态与骨骼调整"},
-            {"path": "/skill/mmd/render", "description": "渲染输出"},
+            {
+                "path": "/skill/mmd/pose",
+                "description": "姿态与骨骼调整",
+                "schema": {"type": "object", "properties": {}},
+            },
+            {
+                "path": "/skill/mmd/render",
+                "description": "渲染输出",
+                "schema": {"type": "object", "properties": {}},
+            },
         ]
 
     def test_projection_is_usable_by_to_provider_3_7(self, tree) -> None:

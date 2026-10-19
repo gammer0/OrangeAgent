@@ -46,6 +46,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from apps.server.sessions import SessionManager, SessionRunner
+from harness.capabilities import manifest_path as capability_manifest_path
 from harness.config import ConfigError, build_proxy, load_llm_config
 from harness.defaults import DEFAULT_CONTEXT
 from harness.rate import RateWindow
@@ -191,7 +192,7 @@ def create_app(workdir: str | Path | None = None) -> FastAPI:
             "capability_error": manager.capability_error if manager else None,
             "compress_available": manager.compress_available if manager else False,
             "capability_file": str(
-                state.workdir / ".agent" / "capabilities.json"
+                capability_manifest_path(state.workdir)
             ),
         }
 
